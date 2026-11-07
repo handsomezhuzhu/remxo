@@ -37,6 +37,8 @@ jobs:
             command: cargo build && python3 tests/integration/fault_and_stress.py && for iteration in $(seq 1 20); do python3 tests/integration/fault_and_stress.py FaultAndStressTests.test_eight_concurrent_json_clients_execute_once_with_unique_request_ids || exit 1; done && python3 tests/integration/check_cleanup.py
     runs-on: instabox-medium
     timeout-minutes: 35
+    env:
+      REMXO_BIN: ${{ github.workspace }}/target/debug/remxo
     steps:
       - uses: actions/checkout@v4
       - name: '${{ matrix.name }}'

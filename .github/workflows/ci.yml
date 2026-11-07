@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: |
           docker run --rm \
-            --volume "$PWD:/data/workspace/remxo:ro" \
+            --volume "$PWD:/data/workspace/remxo" \
             --workdir /data/workspace/remxo \
             rust:1.88.0-slim-bookworm \
-            bash -lc 'cargo test --all-targets -- --test-threads=1'
+            bash -c 'cargo test --all-targets -- --test-threads=1'
