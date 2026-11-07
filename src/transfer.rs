@@ -2,8 +2,10 @@ use crate::config::{AuthMode, Host};
 use crate::error::{AppError, ErrorCode, Result};
 use crate::output::process;
 use crate::shell::posix_quote;
-use crate::transport::openssh::OpensshTransport;
-use crate::transport::{ExecutionRequest, ProcessTermination, Transport as _, run_process};
+use crate::transport::openssh::{OpensshTransport, prepare_authentication};
+use crate::transport::{
+    AuthenticationContext, ExecutionRequest, ProcessTermination, Transport as _, run_process,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -50,9 +52,6 @@ fn remote_scp_path(host: &Host, path: &str) -> String {
 fn scp_arguments(host: &Host, timeout: Duration) -> Result<Vec<String>> {
     host.validate("transfer")?;
     let mut args = vec![
-        "-B".into(),
-        "-o".into(),
-        "BatchMode=yes".into(),
         "-o".into(),
         format!("ConnectTimeout={}", timeout.as_secs().max(1)),
     ];
@@ -69,6 +68,7 @@ pub async fn put(
     overwrite: bool,
     timeout: Duration,
     max_output: usize,
+    auth_context: Option<&AuthenticationContext>,
 ) -> Result<TransferOutcome> {
     host.validate("transfer")?;
     let bytes = std::fs::metadata(local)
@@ -84,6 +84,7 @@ pub async fn put(
                 timeout,
                 max_output,
                 sudo_password: None,
+                auth_context: auth_context.cloned(),
             })
             .await?;
         if outcome.exit_code == Some(1) {
@@ -106,6 +107,7 @@ pub async fn put(
         true,
         timeout,
         max_output,
+        auth_context,
     )
     .await?;
     Ok(TransferOutcome {
@@ -122,6 +124,7 @@ pub async fn get(
     overwrite: bool,
     timeout: Duration,
     max_output: usize,
+    auth_context: Option<&AuthenticationContext>,
 ) -> Result<TransferOutcome> {
     if local.exists() && !overwrite {
         return Err(AppError::new(
@@ -136,6 +139,7 @@ pub async fn get(
         false,
         timeout,
         max_output,
+        auth_context,
     )
     .await?;
     let bytes = std::fs::metadata(local)
@@ -155,15 +159,12 @@ async fn scp(
     upload: bool,
     timeout: Duration,
     max_output: usize,
+    auth_context: Option<&AuthenticationContext>,
 ) -> Result<()> {
-    if host.auth == AuthMode::VaultKey || host.auth == AuthMode::VaultPassword {
-        return Err(AppError::new(
-            ErrorCode::UnsupportedOperation,
-            "this transfer build supports OpenSSH config and external-agent authentication",
-        ));
-    }
+    let authentication = prepare_authentication(host, auth_context, false).await?;
     let binary = std::env::var_os("REMXO_SCP").unwrap_or_else(|| "scp".into());
     let mut command = Command::new(binary);
+    authentication.apply(&mut command);
     command.args(scp_arguments(host, timeout)?);
     command.arg("-s").arg("--");
     if upload {
@@ -206,12 +207,6 @@ fn interactive_sftp_arguments(host: &Host) -> Result<Vec<String>> {
     if host.transport != crate::config::TransportKind::Ssh {
         return Err(AppError::invalid_argument("SFTP requires an SSH host"));
     }
-    if host.auth == AuthMode::VaultKey {
-        return Err(AppError::new(
-            ErrorCode::UnsupportedOperation,
-            "vault-key is not yet integrated with interactive SFTP",
-        ));
-    }
     if host.auth == AuthMode::ExternalAgent && !crate::transport::check_agent_available(host) {
         return Err(AppError::new(
             ErrorCode::AgentUnavailable,
@@ -225,9 +220,11 @@ fn interactive_sftp_arguments(host: &Host) -> Result<Vec<String>> {
     Ok(arguments)
 }
 
-pub fn sftp(host: &Host) -> Result<i32> {
+pub async fn sftp(host: &Host, auth_context: Option<&AuthenticationContext>) -> Result<i32> {
+    let authentication = prepare_authentication(host, auth_context, true).await?;
     let binary = std::env::var_os("REMXO_SFTP").unwrap_or_else(|| "sftp".into());
     let mut command = std::process::Command::new(binary);
+    authentication.apply_std(&mut command);
     command.args(interactive_sftp_arguments(host)?);
     command.arg("--").arg(host.destination());
     let status = command
@@ -308,6 +305,7 @@ mod tests {
             false,
             Duration::from_secs(1),
             1024,
+            None,
         );
         let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| panic!("runtime: {e}"));
         assert_eq!(

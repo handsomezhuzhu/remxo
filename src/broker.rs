@@ -1,6 +1,7 @@
 use crate::approval::{Approval, ApprovalManager};
 use crate::audit::{AuditEvent, AuditLog, request_digest};
 use crate::config::{AppPaths, Config, TransportKind, resolve_target};
+use crate::credential::{SSH_PASSWORD_KIND, SSH_PRIVATE_KEY_KIND};
 use crate::error::{AppError, ErrorCode, ErrorDetail, Result};
 use crate::model::{Decision, OperationReport, OperationStatus, StatusReport};
 use crate::policy;
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
@@ -45,6 +46,7 @@ struct PreparedExecution {
     sudo_password: Option<zeroize::Zeroizing<String>>,
     digest: String,
     operation: String,
+    auth_context: Option<crate::transport::AuthenticationContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,7 +151,10 @@ impl Broker {
     pub async fn set_credential(&self, name: &str, kind: &str, value: &str) -> Result<()> {
         if name.is_empty()
             || name.len() > 256
-            || !matches!(kind, "ssh-password" | "sudo-password" | "telnet-password")
+            || !matches!(
+                kind,
+                "ssh-password" | "ssh-private-key" | "sudo-password" | "telnet-password"
+            )
         {
             return Err(AppError::invalid_argument(
                 "invalid credential name or kind",
@@ -157,6 +162,11 @@ impl Broker {
         }
         let mut guard = self.vault.lock().await;
         let vault = guard.as_mut().ok_or_else(crate::vault::vault_locked)?;
+        if value.len() > crate::credential::MAX_PRIVATE_KEY_BYTES {
+            return Err(AppError::invalid_argument(
+                "credential exceeds the 1 MiB secret size limit",
+            ));
+        }
         vault.put_record(
             name,
             Credential {
@@ -165,6 +175,68 @@ impl Broker {
                 metadata: BTreeMap::new(),
             },
         )
+    }
+
+    pub async fn import_private_key(&self, name: &str, path: &std::path::Path) -> Result<()> {
+        {
+            let guard = self.vault.lock().await;
+            if guard.as_ref().is_none_or(|vault| !vault.is_unlocked()) {
+                return Err(crate::vault::vault_locked());
+            }
+        }
+        let key = crate::credential::read_private_key(path)?;
+        self.set_credential(name, SSH_PRIVATE_KEY_KIND, &key).await
+    }
+
+    pub async fn credential_for_authentication(
+        &self,
+        target: &str,
+        pending_host: Option<&crate::config::Host>,
+        private_key: bool,
+    ) -> Result<(String, String)> {
+        let config = Config::load(&self.paths.config)?;
+        let target = if let Some(host) = pending_host {
+            if config.hosts.contains_key(target) {
+                return Err(AppError::new(
+                    ErrorCode::AlreadyExists,
+                    "a saved host must use authentication derived from its registered configuration",
+                ));
+            }
+            host.validate(target)?;
+            crate::config::ResolvedTarget {
+                alias: target.to_string(),
+                host: host.clone(),
+            }
+        } else {
+            resolve_target(&config, target)?
+        };
+        let (name, expected_kind) = match (target.host.auth, private_key) {
+            (crate::config::AuthMode::VaultPassword, false)
+            | (crate::config::AuthMode::VaultKey, false) => {
+                let stem = target.host.credential.as_deref().unwrap_or(&target.alias);
+                (
+                    crate::credential::ssh_credential_name(stem),
+                    SSH_PASSWORD_KIND,
+                )
+            }
+            (crate::config::AuthMode::VaultKey, true) => {
+                let stem = target.host.credential.as_deref().unwrap_or(&target.alias);
+                (
+                    crate::credential::key_credential_name(stem),
+                    SSH_PRIVATE_KEY_KIND,
+                )
+            }
+            _ => {
+                return Err(AppError::new(
+                    ErrorCode::UnsupportedOperation,
+                    "requested authentication material is not valid for this host authentication mode",
+                ));
+            }
+        };
+        let mut guard = self.vault.lock().await;
+        let vault = guard.as_mut().ok_or_else(crate::vault::vault_locked)?;
+        let value = vault.credential_with_auth_kind(&name, expected_kind)?;
+        Ok((expected_kind.to_string(), value))
     }
 
     async fn prepare(&self, spec: &ExecuteSpec) -> Result<PreparedExecution> {
@@ -188,6 +260,7 @@ impl Broker {
                     timeout: Duration::from_secs(1),
                     max_output: config.settings.max_output,
                     sudo_password: None,
+                    auth_context: None,
                 })
                 .await
                 .map(|_| {
@@ -241,8 +314,13 @@ impl Broker {
         } else {
             None
         };
+        let auth_context = crate::transport::AuthenticationContext::registered(
+            self.paths.clone(),
+            &target.alias,
+            &target.host,
+        );
         Ok(PreparedExecution {
-            alias: target.alias,
+            alias: target.alias.clone(),
             host: target.host,
             script: final_script,
             timeout,
@@ -250,6 +328,7 @@ impl Broker {
             sudo_password,
             digest,
             operation: operation.to_string(),
+            auth_context,
         })
     }
 
@@ -350,6 +429,11 @@ impl Broker {
                 report
             }
             Ok(prepared) => {
+                let auth_context = crate::transport::AuthenticationContext::registered(
+                    self.paths.clone(),
+                    &prepared.alias,
+                    &prepared.host,
+                );
                 let execution = if prepared.upload {
                     crate::transfer::put(
                         &prepared.host,
@@ -358,6 +442,7 @@ impl Broker {
                         prepared.overwrite,
                         prepared.timeout,
                         prepared.max_output,
+                        auth_context.as_ref(),
                     )
                     .await
                 } else {
@@ -368,6 +453,7 @@ impl Broker {
                         prepared.overwrite,
                         prepared.timeout,
                         prepared.max_output,
+                        auth_context.as_ref(),
                     )
                     .await
                 };
@@ -500,7 +586,17 @@ impl Broker {
         }
         let summary = self
             .tunnels
-            .start(target.alias.clone(), &target.host, spec)
+            .start(
+                target.alias.clone(),
+                &target.host,
+                spec,
+                crate::transport::AuthenticationContext::registered(
+                    self.paths.clone(),
+                    &target.alias,
+                    &target.host,
+                )
+                .as_ref(),
+            )
             .await?;
         let mut report = OperationReport::new(Some(target.alias), operation.to_string()).success();
         report.stdout = serde_json::to_string(&summary)
@@ -535,6 +631,7 @@ async fn execute_prepared(
         sudo_password: prepared
             .sudo_password
             .map(|password| password.as_str().to_string()),
+        auth_context: prepared.auth_context,
     };
     let cancelled = cancellation
         .as_ref()
@@ -611,7 +708,7 @@ struct Call {
     request: RpcRequest,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct RpcResponse {
     result: std::result::Result<RpcPayload, ErrorDetail>,
 }
@@ -634,6 +731,15 @@ pub enum RpcRequest {
         name: String,
         kind: String,
         value: String,
+    },
+    ImportPrivateKey {
+        name: String,
+        path: std::path::PathBuf,
+    },
+    SecretForAuth {
+        target: String,
+        pending_host: Option<crate::config::Host>,
+        private_key: bool,
     },
     Execute {
         spec: ExecuteSpec,
@@ -677,7 +783,7 @@ impl Drop for RpcRequest {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum RpcPayload {
     Ack,
@@ -690,6 +796,7 @@ pub enum RpcPayload {
     Approval(Approval),
     Tunnels(Vec<TunnelSummary>),
     Tunnel(TunnelSummary),
+    Secret { kind: String, value: String },
 }
 
 #[cfg(unix)]
@@ -744,23 +851,36 @@ pub async fn serve(paths: AppPaths) -> Result<()> {
     }
 }
 
-async fn handle_connection(stream: TcpStream, broker: Arc<Broker>) -> Result<()> {
-    let (read, mut write) = stream.into_split();
-    let mut line = String::new();
+const MAX_BROKER_REQUEST_BYTES: usize = 8 * 1_048_576;
+
+async fn read_broker_request<R>(reader: R) -> Result<zeroize::Zeroizing<String>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut line = zeroize::Zeroizing::new(String::new());
     tokio::time::timeout(
         Duration::from_secs(10),
-        BufReader::new(read).read_line(&mut line),
+        BufReader::new(reader)
+            .take((MAX_BROKER_REQUEST_BYTES + 1) as u64)
+            .read_line(&mut line),
     )
     .await
     .map_err(|_| AppError::new(ErrorCode::Timeout, "broker request timed out"))?
     .map_err(|e| AppError::io("read broker request", e))?;
-    if line.is_empty() || line.len() > 1_048_576 {
+    if line.is_empty() || line.len() > MAX_BROKER_REQUEST_BYTES {
         return Err(AppError::invalid_argument(
             "empty or oversized broker request",
         ));
     }
+    Ok(line)
+}
+
+async fn handle_connection(stream: TcpStream, broker: Arc<Broker>) -> Result<()> {
+    let (read, mut write) = stream.into_split();
+    let line = read_broker_request(read).await?;
     let mut call: Call = serde_json::from_str(&line)
         .map_err(|e| AppError::invalid_argument(format!("invalid broker request: {e}")))?;
+    drop(line);
     let endpoint = read_endpoint(&broker.paths)?;
     let authenticated = call.token == endpoint.token;
     call.token.zeroize();
@@ -775,8 +895,14 @@ async fn handle_connection(stream: TcpStream, broker: Arc<Broker>) -> Result<()>
         .await
         .map_err(|error| error.detail());
     zeroize_request(&mut call.request);
-    let response = serde_json::to_vec(&RpcResponse { result })
-        .map_err(|e| AppError::internal(format!("serialize broker response: {e}")))?;
+    let response = RpcResponse { result };
+    let serialized = serde_json::to_vec(&response)
+        .map_err(|e| AppError::internal(format!("serialize broker response: {e}")));
+    let mut response = response;
+    if let Ok(RpcPayload::Secret { value, .. }) = &mut response.result {
+        value.zeroize();
+    }
+    let response = zeroize::Zeroizing::new(serialized?);
     write
         .write_all(&response)
         .await
@@ -828,6 +954,20 @@ async fn dispatch(broker: &Arc<Broker>, request: &RpcRequest) -> Result<RpcPaylo
         RpcRequest::SetCredential { name, kind, value } => {
             broker.set_credential(name, kind, value).await?;
             Ok(RpcPayload::Ack)
+        }
+        RpcRequest::ImportPrivateKey { name, path } => {
+            broker.import_private_key(name, path).await?;
+            Ok(RpcPayload::Ack)
+        }
+        RpcRequest::SecretForAuth {
+            target,
+            pending_host,
+            private_key,
+        } => {
+            let (kind, value) = broker
+                .credential_for_authentication(target, pending_host.as_ref(), *private_key)
+                .await?;
+            Ok(RpcPayload::Secret { kind, value })
         }
         RpcRequest::Execute { spec } => Ok(RpcPayload::Report(broker.execute(spec.clone()).await)),
         RpcRequest::Transfer { spec } => {
@@ -977,4 +1117,25 @@ fn read_endpoint(paths: &AppPaths) -> Result<BrokerEndpoint> {
         std::fs::read(paths.broker()).map_err(|e| AppError::io("read broker endpoint", e))?;
     serde_json::from_slice(&bytes)
         .map_err(|e| AppError::invalid_argument(format!("invalid broker endpoint: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn broker_reader_enforces_its_limit_before_accepting_a_line() {
+        let oversized = vec![b'x'; MAX_BROKER_REQUEST_BYTES + 1];
+        let error = read_broker_request(oversized.as_slice()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(!error.message.contains('x'));
+
+        let error = read_broker_request(&b""[..]).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+
+        let accepted = read_broker_request(&b"{\"method\":\"ping\"}\n"[..])
+            .await
+            .unwrap_or_else(|error| panic!("read: {error}"));
+        assert_eq!(accepted.as_str(), "{\"method\":\"ping\"}\n");
+    }
 }

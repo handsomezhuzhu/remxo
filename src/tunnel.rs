@@ -1,6 +1,7 @@
 use crate::config::Host;
 use crate::error::{AppError, ErrorCode, Result};
-use crate::transport::openssh::OpensshTransport;
+use crate::transport::openssh::{OpensshTransport, prepare_authentication};
+use crate::transport::{AuthenticationContext, openssh::ProcessAuthentication};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -117,6 +118,7 @@ pub struct TunnelSummary {
 struct TunnelRecord {
     summary: TunnelSummary,
     child: Child,
+    _authentication: ProcessAuthentication,
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +189,7 @@ impl TunnelManager {
         host_alias: String,
         host: &Host,
         spec: TunnelSpec,
+        auth_context: Option<&AuthenticationContext>,
     ) -> Result<TunnelSummary> {
         let transport = OpensshTransport::default();
         let mut arguments = transport.base_arguments(host, true, Duration::from_secs(30))?;
@@ -207,7 +210,10 @@ impl TunnelManager {
             spec.argument.clone(),
             destination,
         ]);
-        let mut child = Command::new(transport.binary())
+        let mut command = Command::new(transport.binary());
+        let authentication = prepare_authentication(host, auth_context, false).await?;
+        authentication.apply(&mut command);
+        let mut child = command
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -244,6 +250,7 @@ impl TunnelManager {
             TunnelRecord {
                 summary: summary.clone(),
                 child,
+                _authentication: authentication,
             },
         );
         Ok(summary)

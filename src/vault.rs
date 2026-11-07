@@ -234,6 +234,23 @@ impl VaultSession {
         Ok(credential.value.clone())
     }
 
+    pub fn credential_with_auth_kind(&self, name: &str, expected_kind: &str) -> Result<String> {
+        let data = self.read_data()?;
+        let credential = data.records.get(name).ok_or_else(|| {
+            AppError::new(
+                ErrorCode::AuthenticationFailed,
+                "the required SSH credential is not configured for this host; a human must configure it through the host wizard",
+            )
+        })?;
+        if credential.kind != expected_kind {
+            return Err(AppError::new(
+                ErrorCode::AuthenticationFailed,
+                "credential type does not match the host authentication mode",
+            ));
+        }
+        Ok(credential.value.clone())
+    }
+
     pub fn change_password(&mut self, old_password: &str, new_password: &str) -> Result<()> {
         if new_password.len() < 12 {
             return Err(AppError::invalid_argument(

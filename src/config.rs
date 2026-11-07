@@ -214,6 +214,32 @@ fn default_max_output() -> usize {
     65_536
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiLanguage {
+    #[default]
+    En,
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+}
+
+impl UiLanguage {
+    pub fn text(self, english: &'static str, chinese: &'static str) -> &'static str {
+        match self {
+            Self::En => english,
+            Self::ZhCn => chinese,
+        }
+    }
+
+    pub fn from_arg(arg: &str) -> Result<Self> {
+        match arg.trim().to_ascii_lowercase().as_str() {
+            "en" | "english" => Ok(Self::En),
+            "zh" | "cn" | "zh-cn" | "zh_cn" | "chinese" | "中文" => Ok(Self::ZhCn),
+            _ => Err(AppError::invalid_argument("language must be en or zh-CN")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -222,6 +248,7 @@ pub struct Settings {
     pub max_output: usize,
     pub allow_overwrite: bool,
     pub audit_output: bool,
+    pub language: UiLanguage,
 }
 
 impl Default for Settings {
@@ -232,6 +259,7 @@ impl Default for Settings {
             max_output: default_max_output(),
             allow_overwrite: false,
             audit_output: false,
+            language: UiLanguage::En,
         }
     }
 }
@@ -299,7 +327,12 @@ impl Config {
     }
 
     pub fn initialize(path: &Path) -> Result<Self> {
-        let config = Self::default();
+        Self::initialize_with_language(path, UiLanguage::En)
+    }
+
+    pub fn initialize_with_language(path: &Path, language: UiLanguage) -> Result<Self> {
+        let mut config = Self::default();
+        config.settings.language = language;
         let text = toml::to_string_pretty(&config)
             .map_err(|e| AppError::internal(format!("serialize default config: {e}")))?;
         create_new(path, text.as_bytes())?;
@@ -446,6 +479,21 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn language_is_persisted_and_old_configs_default_to_english() {
+        let mut config = Config::default();
+        assert_eq!(config.settings.language, UiLanguage::En);
+        config.settings.language = UiLanguage::ZhCn;
+        let serialized = toml::to_string(&config).unwrap_or_else(|error| panic!("toml: {error}"));
+        assert!(serialized.contains("zh-CN"));
+        let restored: Config =
+            toml::from_str(&serialized).unwrap_or_else(|error| panic!("parse: {error}"));
+        assert_eq!(restored.settings.language, UiLanguage::ZhCn);
+        let legacy: Config = toml::from_str("version = 1\n")
+            .unwrap_or_else(|error| panic!("legacy config: {error}"));
+        assert_eq!(legacy.settings.language, UiLanguage::En);
     }
 
     #[test]

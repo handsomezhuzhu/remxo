@@ -68,7 +68,7 @@ pub fn create_new(path: &Path, contents: &[u8]) -> Result<()> {
         .map_err(|e| AppError::io("sync private file", e))
 }
 
-fn restrict_file(file: &fs::File) -> Result<()> {
+pub(crate) fn restrict_file(file: &fs::File) -> Result<()> {
     #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|e| AppError::io("restrict private file", e))?;

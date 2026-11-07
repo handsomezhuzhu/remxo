@@ -2,7 +2,7 @@ use super::{
     Capabilities, ExecutionOutcome, ExecutionRequest, ProcessTermination, RawProcessOutput,
     Transport, check_agent_available, run_process, validate_auth,
 };
-use crate::config::{Host, TransportKind};
+use crate::config::{AuthMode, Host, TransportKind};
 use crate::error::{AppError, ErrorCode, Result};
 use crate::output::process_with_secrets;
 use async_trait::async_trait;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 use tokio::process::Command;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Clone)]
 pub struct OpensshTransport {
@@ -25,6 +25,156 @@ impl Default for OpensshTransport {
                 .unwrap_or_else(|| PathBuf::from("ssh")),
         }
     }
+}
+
+const ASKPASS_CONFIG_ENV: &str = "REMXO_ASKPASS_CONFIG";
+const ASKPASS_TARGET_ENV: &str = "REMXO_ASKPASS_TARGET";
+const ASKPASS_PENDING_ENV: &str = "REMXO_ASKPASS_PENDING_HOST";
+
+#[derive(Debug)]
+pub(crate) struct ProcessAuthentication {
+    arguments: Vec<String>,
+    askpass: Option<AskpassEnvironment>,
+    _managed_key: Option<crate::credential::TemporaryPrivateKey>,
+}
+
+#[derive(Debug)]
+struct AskpassEnvironment {
+    executable: PathBuf,
+    config: PathBuf,
+    target: String,
+    pending_host: Option<String>,
+}
+
+impl ProcessAuthentication {
+    pub fn apply(&self, command: &mut Command) {
+        command.args(&self.arguments);
+        if let Some(askpass) = &self.askpass {
+            command
+                .env("SSH_ASKPASS", &askpass.executable)
+                .env("SSH_ASKPASS_REQUIRE", "force")
+                .env(ASKPASS_CONFIG_ENV, &askpass.config)
+                .env(ASKPASS_TARGET_ENV, &askpass.target)
+                .env_remove(ASKPASS_PENDING_ENV);
+            if let Some(pending_host) = &askpass.pending_host {
+                command.env(ASKPASS_PENDING_ENV, pending_host);
+            }
+        }
+    }
+
+    pub fn apply_std(&self, command: &mut StdCommand) {
+        command.args(&self.arguments);
+        if let Some(askpass) = &self.askpass {
+            command
+                .env("SSH_ASKPASS", &askpass.executable)
+                .env("SSH_ASKPASS_REQUIRE", "force")
+                .env(ASKPASS_CONFIG_ENV, &askpass.config)
+                .env(ASKPASS_TARGET_ENV, &askpass.target)
+                .env_remove(ASKPASS_PENDING_ENV);
+            if let Some(pending_host) = &askpass.pending_host {
+                command.env(ASKPASS_PENDING_ENV, pending_host);
+            }
+        }
+    }
+}
+
+pub(crate) async fn prepare_authentication(
+    host: &Host,
+    context: Option<&super::AuthenticationContext>,
+    interactive: bool,
+) -> Result<ProcessAuthentication> {
+    let mut arguments = Vec::new();
+    if matches!(host.auth, AuthMode::OpensshConfig | AuthMode::ExternalAgent) {
+        if !interactive {
+            arguments.extend(["-o".into(), "BatchMode=yes".into()]);
+        }
+        return Ok(ProcessAuthentication {
+            arguments,
+            askpass: None,
+            _managed_key: None,
+        });
+    }
+    let context = context.ok_or_else(|| {
+        AppError::new(
+            ErrorCode::UnsupportedOperation,
+            "vault-managed SSH authentication requires an active Broker and an unlocked Vault",
+        )
+    })?;
+    if context
+        .pending_host
+        .as_ref()
+        .is_some_and(|pending| pending.auth != host.auth)
+    {
+        return Err(AppError::new(
+            ErrorCode::InvalidConfig,
+            "SSH authentication context does not match the host authentication mode",
+        ));
+    }
+    let pending_host = context
+        .pending_host
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| {
+            AppError::internal(format!("serialize pending authentication host: {error}"))
+        })?;
+    let executable = std::env::current_exe()
+        .map_err(|error| AppError::io("locate Remxo askpass helper", error))?;
+    let askpass = AskpassEnvironment {
+        executable,
+        config: context.paths.config.clone(),
+        target: context.alias.clone(),
+        pending_host,
+    };
+    arguments.extend([
+        "-o".into(),
+        "BatchMode=no".into(),
+        "-o".into(),
+        "NumberOfPasswordPrompts=1".into(),
+    ]);
+    let mut managed_key = None;
+    match host.auth {
+        AuthMode::VaultPassword => arguments.extend([
+            "-o".into(),
+            "PreferredAuthentications=password".into(),
+            "-o".into(),
+            "PubkeyAuthentication=no".into(),
+            "-o".into(),
+            "PasswordAuthentication=yes".into(),
+            "-o".into(),
+            "KbdInteractiveAuthentication=no".into(),
+        ]),
+        AuthMode::VaultKey => {
+            let key = materialize_key(context).await?;
+            arguments.extend([
+                "-i".into(),
+                key.path().to_string_lossy().into_owned(),
+                "-o".into(),
+                "IdentitiesOnly=yes".into(),
+                "-o".into(),
+                "IdentityAgent=none".into(),
+                "-o".into(),
+                "PreferredAuthentications=publickey".into(),
+                "-o".into(),
+                "PubkeyAuthentication=yes".into(),
+                "-o".into(),
+                "PasswordAuthentication=no".into(),
+                "-o".into(),
+                "KbdInteractiveAuthentication=no".into(),
+            ]);
+            managed_key = Some(key);
+        }
+        AuthMode::OpensshConfig | AuthMode::ExternalAgent => {
+            return Err(AppError::internal(
+                "unreachable external authentication branch",
+            ));
+        }
+    }
+    Ok(ProcessAuthentication {
+        arguments,
+        askpass: Some(askpass),
+        _managed_key: managed_key,
+    })
 }
 
 impl OpensshTransport {
@@ -52,8 +202,6 @@ impl OpensshTransport {
         if batch {
             arguments.extend([
                 "-o".into(),
-                "BatchMode=yes".into(),
-                "-o".into(),
                 format!("ConnectTimeout={}", timeout.as_secs().max(1)),
                 "-T".into(),
             ]);
@@ -71,6 +219,23 @@ impl OpensshTransport {
         agent_available: bool,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<ExecutionOutcome> {
+        if matches!(
+            request.host.auth,
+            crate::config::AuthMode::VaultPassword | crate::config::AuthMode::VaultKey
+        ) {
+            if request.host.shell != crate::config::ShellKind::Posix {
+                return Err(AppError::new(
+                    ErrorCode::UnsupportedShell,
+                    "Vault-managed authentication currently requires POSIX shell",
+                ));
+            }
+            if request.auth_context.is_none() {
+                return Err(AppError::new(
+                    ErrorCode::UnsupportedOperation,
+                    "vault-managed SSH authentication requires an active Broker and an unlocked Vault",
+                ));
+            }
+        }
         validate_auth(&request.host)?;
         if request.host.auth == crate::config::AuthMode::ExternalAgent && !agent_available {
             return Err(AppError::new(
@@ -78,8 +243,15 @@ impl OpensshTransport {
                 "external SSH agent is unavailable or has no usable socket; a human must unlock/configure it",
             ));
         }
-        let arguments = self.base_arguments(&request.host, true, request.timeout)?;
+        let mut arguments = self.base_arguments(&request.host, true, request.timeout)?;
+        let destination = arguments
+            .pop()
+            .ok_or_else(|| AppError::internal("missing SSH destination"))?;
         let mut command = Command::new(&self.ssh_binary);
+        let authentication =
+            prepare_authentication(&request.host, request.auth_context.as_ref(), false).await?;
+        authentication.apply(&mut command);
+        arguments.push(destination);
         command.args(arguments).arg(request.script);
         let raw_limit = request.max_output.saturating_mul(4).min(64 * 1024 * 1024);
         let stdin_password = request.sudo_password.map(Zeroizing::new);
@@ -177,6 +349,30 @@ impl OpensshTransport {
         self.execute(request, agent_available, Some(cancellation))
             .await
     }
+    pub async fn interactive_authenticated(
+        &self,
+        host: &Host,
+        context: Option<&super::AuthenticationContext>,
+    ) -> Result<i32> {
+        if host.auth == crate::config::AuthMode::ExternalAgent && !check_agent_available(host) {
+            return Err(AppError::new(
+                ErrorCode::AgentUnavailable,
+                "external SSH agent is unavailable",
+            ));
+        }
+        let authentication = prepare_authentication(host, context, true).await?;
+        let arguments = self.base_arguments(host, false, Duration::from_secs(30))?;
+        let mut command = StdCommand::new(&self.ssh_binary);
+        authentication.apply_std(&mut command);
+        let status = command
+            .args(arguments)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| AppError::io("start interactive OpenSSH", e))?;
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
 #[async_trait]
@@ -197,10 +393,13 @@ impl Transport for OpensshTransport {
     }
 
     fn interactive(&self, host: &Host) -> Result<i32> {
-        if host.auth == crate::config::AuthMode::VaultKey {
+        if matches!(
+            host.auth,
+            crate::config::AuthMode::VaultKey | crate::config::AuthMode::VaultPassword
+        ) {
             return Err(AppError::new(
                 ErrorCode::UnsupportedOperation,
-                "vault-key is not yet integrated with interactive OpenSSH",
+                "Vault authentication requires interactive_authenticated with a Broker authentication context",
             ));
         }
         if host.auth == crate::config::AuthMode::ExternalAgent && !check_agent_available(host) {
@@ -219,6 +418,36 @@ impl Transport for OpensshTransport {
             .map_err(|e| AppError::io("start interactive OpenSSH", e))?;
         Ok(status.code().unwrap_or(1))
     }
+}
+
+async fn materialize_key(
+    context: &super::AuthenticationContext,
+) -> Result<crate::credential::TemporaryPrivateKey> {
+    let client = crate::broker::BrokerClient::new(context.paths.clone());
+    let payload = client
+        .call(crate::broker::RpcRequest::SecretForAuth {
+            target: context.alias.clone(),
+            pending_host: context.pending_host.clone(),
+            private_key: true,
+        })
+        .await?;
+    let crate::broker::RpcPayload::Secret { kind, mut value } = payload else {
+        return Err(AppError::new(
+            ErrorCode::InternalError,
+            "unexpected response while obtaining vault private key",
+        ));
+    };
+    if kind != crate::credential::SSH_PRIVATE_KEY_KIND {
+        value.zeroize();
+        return Err(AppError::new(
+            ErrorCode::AuthenticationFailed,
+            "the selected credential is not a Vault-managed OpenSSH private key",
+        ));
+    }
+    crate::credential::TemporaryPrivateKey::create(
+        context.paths.root.join("runtime").as_path(),
+        Zeroizing::new(value).as_str(),
+    )
 }
 
 fn classify_ssh_failure(stderr: &str) -> AppError {
@@ -313,6 +542,7 @@ mod tests {
                     timeout: Duration::from_secs(2),
                     max_output: 1024,
                     sudo_password: None,
+                    auth_context: None,
                 },
                 true,
             )
@@ -341,6 +571,7 @@ mod tests {
                     timeout: Duration::from_secs(1),
                     max_output: 1024,
                     sudo_password: None,
+                    auth_context: None,
                 },
                 false,
             )
@@ -362,6 +593,7 @@ mod tests {
                     timeout: Duration::from_millis(100),
                     max_output: 1024,
                     sudo_password: None,
+                    auth_context: None,
                 },
                 true,
             )
@@ -396,6 +628,7 @@ mod tests {
                     timeout: Duration::from_secs(2),
                     max_output: 4096,
                     sudo_password: Some("test-only-sudo-secret-value".into()),
+                    auth_context: None,
                 },
                 true,
             )
@@ -423,6 +656,7 @@ mod tests {
                     timeout: Duration::from_secs(2),
                     max_output: 1024,
                     sudo_password: Some("test-only-sudo-password".into()),
+                    auth_context: None,
                 },
                 true,
             )

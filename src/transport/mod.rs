@@ -58,17 +58,30 @@ pub(crate) async fn run_process(
             format!("cannot start remote transport: {e}"),
         )
     })?;
-    if let Some(data) = stdin_data
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        stdin
-            .write_all(&data)
-            .await
-            .map_err(|e| AppError::io("write secure standard input", e))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|e| AppError::io("close secure standard input", e))?;
+    if let Some(data) = stdin_data {
+        let input_result = match child.stdin.take() {
+            Some(mut stdin) => {
+                async {
+                    stdin
+                        .write_all(&data)
+                        .await
+                        .map_err(|error| AppError::io("write secure standard input", error))?;
+                    stdin
+                        .shutdown()
+                        .await
+                        .map_err(|error| AppError::io("close secure standard input", error))
+                }
+                .await
+            }
+            None => Err(AppError::internal("missing secure standard input")),
+        };
+        if let Err(error) = input_result {
+            // Authentication guards must not be released while this child may
+            // still be using its temporary private-key file or other resources.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
     }
     let stdout = child
         .stdout
@@ -151,6 +164,32 @@ pub struct Capabilities {
     pub encrypted: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthenticationContext {
+    pub paths: crate::config::AppPaths,
+    pub alias: String,
+    /// Present only for the wizard's connection test before the host is saved.
+    pub pending_host: Option<Host>,
+}
+
+impl AuthenticationContext {
+    pub fn registered(paths: crate::config::AppPaths, alias: &str, host: &Host) -> Option<Self> {
+        matches!(host.auth, AuthMode::VaultPassword | AuthMode::VaultKey).then(|| Self {
+            paths,
+            alias: alias.to_string(),
+            pending_host: None,
+        })
+    }
+
+    pub fn pending(paths: crate::config::AppPaths, alias: &str, host: &Host) -> Option<Self> {
+        matches!(host.auth, AuthMode::VaultPassword | AuthMode::VaultKey).then(|| Self {
+            paths,
+            alias: alias.to_string(),
+            pending_host: Some(host.clone()),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct ExecutionRequest {
     pub host: Host,
@@ -158,6 +197,7 @@ pub struct ExecutionRequest {
     pub timeout: Duration,
     pub max_output: usize,
     pub sudo_password: Option<String>,
+    pub auth_context: Option<AuthenticationContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,14 +219,7 @@ pub trait Transport: Send + Sync {
 
 pub fn validate_auth(host: &Host) -> Result<()> {
     match host.auth {
-        AuthMode::VaultKey => Err(AppError::new(
-            ErrorCode::UnsupportedOperation,
-            "vault-key OpenSSH integration is reserved for a later phase",
-        )),
-        AuthMode::VaultPassword => Err(AppError::new(
-            ErrorCode::UnsupportedOperation,
-            "non-interactive vault-password OpenSSH integration is not enabled in this build; use interactive SSH or an external agent",
-        )),
+        AuthMode::VaultPassword | AuthMode::VaultKey => Ok(()),
         AuthMode::ExternalAgent | AuthMode::OpensshConfig => Ok(()),
     }
 }
@@ -204,5 +237,54 @@ pub fn check_agent_available(host: &Host) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn stdin_failure_kills_and_reaps_child_before_returning() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let pid_file = directory.path().join("pid");
+        let script = directory.path().join("closed-stdin");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nexec 0<&-\nwhile :; do :; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap_or_else(|error| panic!("fake: {error}"));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("chmod: {error}"));
+        let error = run_process(
+            &mut Command::new(script),
+            Duration::from_secs(5),
+            1024,
+            Some(Zeroizing::new(vec![b'x'; 1024 * 1024])),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.contains("secure standard input"));
+        let pid = std::fs::read_to_string(pid_file)
+            .unwrap_or_else(|error| panic!("pid: {error}"))
+            .trim()
+            .parse::<u32>()
+            .unwrap_or_else(|error| panic!("pid parse: {error}"));
+        let process_path = std::path::Path::new("/proc").join(pid.to_string());
+        for _ in 0..20 {
+            if !process_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !process_path.exists(),
+            "child was not reaped after stdin failure"
+        );
     }
 }

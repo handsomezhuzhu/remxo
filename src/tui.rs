@@ -4,7 +4,6 @@ use crate::broker::{BrokerClient, RpcPayload, RpcRequest};
 use crate::config::{AppPaths, Config, TransportKind};
 use crate::error::{AppError, Result};
 use crate::task::TaskSummary;
-use crate::transport::Transport as _;
 use crate::transport::openssh::OpensshTransport;
 use crate::tunnel::TunnelSummary;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -20,7 +19,7 @@ use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Tab
 use std::io::{Stdout, stdout};
 use std::time::Duration;
 
-const PAGES: [&str; 7] = [
+const PAGES_EN: [&str; 7] = [
     "Hosts",
     "Sessions",
     "Tasks",
@@ -29,6 +28,14 @@ const PAGES: [&str; 7] = [
     "Backup",
     "Settings",
 ];
+const PAGES_ZH: [&str; 7] = ["主机", "会话", "任务", "审批", "审计", "备份", "设置"];
+
+fn pages(language: crate::config::UiLanguage) -> &'static [&'static str; 7] {
+    match language {
+        crate::config::UiLanguage::En => &PAGES_EN,
+        crate::config::UiLanguage::ZhCn => &PAGES_ZH,
+    }
+}
 
 struct App {
     page: usize,
@@ -41,6 +48,8 @@ struct App {
     tunnels: Vec<TunnelSummary>,
     audit: Vec<AuditEvent>,
     vault_locked: bool,
+    no_color: bool,
+    language: crate::config::UiLanguage,
 }
 
 impl Default for App {
@@ -56,11 +65,18 @@ impl Default for App {
             tunnels: Vec::new(),
             audit: Vec::new(),
             vault_locked: true,
+            no_color: false,
+            language: crate::config::UiLanguage::En,
         }
     }
 }
 
 pub async fn run(paths: AppPaths) -> Result<()> {
+    run_with_options(paths, false).await
+}
+
+pub async fn run_with_options(paths: AppPaths, no_color: bool) -> Result<()> {
+    let no_color = no_color || std::env::var_os("NO_COLOR").is_some();
     enable_raw_mode().map_err(|e| AppError::io("enable TUI raw mode", e))?;
     if let Err(error) = execute!(stdout(), EnterAlternateScreen) {
         let _ = disable_raw_mode();
@@ -68,7 +84,7 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     }
     let backend = CrosstermBackend::new(stdout());
     let result = match Terminal::new(backend) {
-        Ok(terminal) => run_loop(terminal, paths).await,
+        Ok(terminal) => run_loop(terminal, paths, no_color).await,
         Err(error) => Err(AppError::io("create TUI terminal", error)),
     };
     let _ = disable_raw_mode();
@@ -76,8 +92,25 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     result
 }
 
-async fn run_loop(mut terminal: Terminal<CrosstermBackend<Stdout>>, paths: AppPaths) -> Result<()> {
-    let mut app = App::default();
+async fn run_loop(
+    mut terminal: Terminal<CrosstermBackend<Stdout>>,
+    paths: AppPaths,
+    no_color: bool,
+) -> Result<()> {
+    let language = Config::load(&paths.config)
+        .map(|config| config.settings.language)
+        .unwrap_or_default();
+    let mut app = App {
+        no_color,
+        language,
+        message: language
+            .text(
+                "L1 development build — remote output is untrusted",
+                "L1 开发版本 — 远程输出不可信",
+            )
+            .into(),
+        ..App::default()
+    };
     let client = BrokerClient::new(paths.clone());
     let _ = client.ensure_running().await;
     let mut last_refresh = std::time::Instant::now() - Duration::from_secs(3);
@@ -121,15 +154,24 @@ async fn run_loop(mut terminal: Terminal<CrosstermBackend<Stdout>>, paths: AppPa
         }
         match key.code {
             KeyCode::Char('q') => return Ok(()),
-            KeyCode::Tab | KeyCode::Right => app.page = (app.page + 1) % PAGES.len(),
+            KeyCode::Tab | KeyCode::Right => app.page = (app.page + 1) % PAGES_EN.len(),
             KeyCode::BackTab | KeyCode::Left => {
-                app.page = (app.page + PAGES.len() - 1) % PAGES.len()
+                app.page = (app.page + PAGES_EN.len() - 1) % PAGES_EN.len()
             }
             KeyCode::Down => app.selected = app.selected.saturating_add(1),
             KeyCode::Up => app.selected = app.selected.saturating_sub(1),
+            KeyCode::Char('a') if app.page == 0 => {
+                suspend(&mut terminal)?;
+                let result = crate::tui_wizard::run(&paths, None, None, app.no_color).await;
+                resume(&mut terminal)?;
+                match result {
+                    Ok(result) => app.message = result.message,
+                    Err(error) => app.message = error.message,
+                }
+            }
             KeyCode::Char('/') => app.searching = app.page == 0,
             KeyCode::Char('l') => match client.call(RpcRequest::Lock).await {
-                Ok(_) => app.message = "Vault locked".into(),
+                Ok(_) => app.message = app.language.text("Vault locked", "Vault 已锁定").into(),
                 Err(error) => app.message = error.message,
             },
             KeyCode::Char('u') => {
@@ -139,7 +181,7 @@ async fn run_loop(mut terminal: Terminal<CrosstermBackend<Stdout>>, paths: AppPa
                 if let Ok(config) = &config {
                     let aliases = filtered_hosts(config, &app.search);
                     if let Some(alias) = aliases.get(app.selected).copied() {
-                        interactive_ssh(&mut terminal, config, alias, &mut app)?;
+                        interactive_ssh(&mut terminal, &paths, config, alias, &mut app).await?;
                     }
                 }
             }
@@ -171,11 +213,11 @@ async fn unlock_prompt(
     app: &mut App,
 ) -> Result<()> {
     suspend(terminal)?;
-    let password = rpassword::prompt_password("Master password: ");
+    let password = rpassword::prompt_password(app.language.text("Master password: ", "主密码："));
     resume(terminal)?;
     match password {
         Ok(password) => match client.call(RpcRequest::Unlock { password }).await {
-            Ok(_) => app.message = "Vault unlocked".into(),
+            Ok(_) => app.message = app.language.text("Vault unlocked", "Vault 已解锁").into(),
             Err(error) => app.message = error.message,
         },
         Err(error) => app.message = format!("Password input failed: {error}"),
@@ -183,8 +225,9 @@ async fn unlock_prompt(
     Ok(())
 }
 
-fn interactive_ssh(
+async fn interactive_ssh(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    paths: &AppPaths,
     config: &Config,
     alias: &str,
     app: &mut App,
@@ -193,21 +236,27 @@ fn interactive_ssh(
         return Ok(());
     };
     suspend(terminal)?;
-    let result = OpensshTransport::default().interactive(host);
+    let context = crate::transport::AuthenticationContext::registered(paths.clone(), alias, host);
+    let result = OpensshTransport::default()
+        .interactive_authenticated(host, context.as_ref())
+        .await;
     resume(terminal)?;
     app.message = match result {
-        Ok(code) => format!("Interactive SSH exited with code {code}"),
+        Ok(code) => match app.language {
+            crate::config::UiLanguage::ZhCn => format!("交互式 SSH 已退出，退出码 {code}"),
+            crate::config::UiLanguage::En => format!("Interactive SSH exited with code {code}"),
+        },
         Err(error) => error.message,
     };
     Ok(())
 }
 
-fn suspend(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+pub(crate) fn suspend(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode().map_err(|e| AppError::io("suspend TUI", e))?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen).map_err(|e| AppError::io("leave TUI", e))
 }
 
-fn resume(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+pub(crate) fn resume(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     enable_raw_mode().map_err(|e| AppError::io("resume TUI", e))?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)
         .map_err(|e| AppError::io("restore TUI", e))?;
@@ -230,17 +279,19 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         Constraint::Length(3),
     ])
     .split(frame.area());
+    let page_names = pages(app.language);
     let title = format!(
         " Remxo │ {} │ Vault {} │ L1 ",
-        PAGES[app.page],
-        if app.vault_locked {
-            "LOCKED"
-        } else {
-            "UNLOCKED"
+        page_names[app.page],
+        match (app.vault_locked, app.language) {
+            (true, crate::config::UiLanguage::En) => "LOCKED",
+            (false, crate::config::UiLanguage::En) => "UNLOCKED",
+            (true, crate::config::UiLanguage::ZhCn) => "已锁定",
+            (false, crate::config::UiLanguage::ZhCn) => "已解锁",
         }
     );
     frame.render_widget(
-        Paragraph::new(PAGES.join("  ·  "))
+        Paragraph::new(page_names.join("  ·  "))
             .block(Block::default().borders(Borders::ALL).title(title)),
         columns[0],
     );
@@ -248,7 +299,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         0 => draw_hosts(frame, app, config, columns[1]),
         1 => draw_lines(
             frame,
-            "Tunnels",
+            app.language.text("Tunnels", "隧道"),
             app.tunnels
                 .iter()
                 .map(|item| {
@@ -262,7 +313,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         ),
         2 => draw_lines(
             frame,
-            "Tasks",
+            app.language.text("Tasks", "任务"),
             app.tasks
                 .iter()
                 .map(|item| {
@@ -276,7 +327,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         ),
         3 => draw_lines(
             frame,
-            "One-time approvals",
+            app.language.text("One-time approvals", "一次性审批"),
             app.approvals
                 .iter()
                 .map(|item| {
@@ -290,7 +341,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         ),
         4 => draw_lines(
             frame,
-            "Audit metadata",
+            app.language.text("Audit metadata", "审计元数据"),
             app.audit
                 .iter()
                 .map(|item| {
@@ -309,10 +360,19 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         ),
         5 => draw_lines(
             frame,
-            "Encrypted backup",
+            app.language.text("Encrypted backup", "加密备份"),
             vec![
-                "Use remxo backup create|verify|restore with a hidden backup password.".into(),
-                "Backups contain no sockets, runtime approvals, sessions, logs, or plaintext DEK."
+                app.language
+                    .text(
+                        "Use remxo backup create|verify|restore with a hidden backup password.",
+                        "使用 remxo backup create|verify|restore，并通过隐藏提示输入备份密码。",
+                    )
+                    .into(),
+                app.language
+                    .text(
+                        "Backups contain no sockets, runtime approvals, sessions, logs, or plaintext DEK.",
+                        "备份不包含套接字、运行时审批、会话、日志或明文 DEK。",
+                    )
                     .into(),
             ],
             columns[1],
@@ -324,18 +384,44 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
                         format!("timeout = {}s", config.settings.timeout_seconds),
                         format!("max_output = {} bytes", config.settings.max_output),
                         format!("allow_ad_hoc = {}", config.settings.allow_ad_hoc),
-                        "Security level: L1 (same-user Broker, not L2 isolation)".into(),
+                        format!(
+                            "language = {}",
+                            match config.settings.language {
+                                crate::config::UiLanguage::En => "en",
+                                crate::config::UiLanguage::ZhCn => "zh-CN",
+                            }
+                        ),
+                        config.settings.language.text(
+                            "Security level: L1 (same-user Broker, not L2 isolation)",
+                            "安全级别：L1（同用户 Broker，不是 L2 隔离）",
+                        )
+                        .into(),
                     ]
                 })
-                .unwrap_or_else(|| vec!["Config unavailable".into()]);
-            draw_lines(frame, "Settings", lines, columns[1]);
+                .unwrap_or_else(|| {
+                    vec![
+                        app.language
+                            .text("Config unavailable", "配置不可用")
+                            .into(),
+                    ]
+                });
+            draw_lines(
+                frame,
+                app.language.text("Settings", "设置"),
+                lines,
+                columns[1],
+            );
         }
         _ => {}
     }
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\nq quit │ Tab pages │ ↑↓ select │ / search │ Enter SSH │ u unlock │ l lock",
-            app.message
+            "{}\n{}",
+            app.message,
+            app.language.text(
+                "q quit │ Tab pages │ ↑↓ select │ a add host │ / search │ Enter SSH │ u unlock │ l lock",
+                "q 退出 │ Tab 页面 │ ↑↓ 选择 │ a 添加主机 │ / 搜索 │ Enter SSH │ u 解锁 │ l 锁定",
+            )
         ))
         .block(Block::default().borders(Borders::ALL)),
         columns[2],
@@ -351,8 +437,15 @@ fn draw_hosts(
     let Some(config) = config else {
         draw_lines(
             frame,
-            "Hosts",
-            vec!["Configuration missing or invalid; run remxo init or fix config.toml.".into()],
+            app.language.text("Hosts", "主机"),
+            vec![
+                app.language
+                    .text(
+                        "Configuration missing or invalid; run remxo init or fix config.toml.",
+                        "配置缺失或无效；请运行 remxo init 或修复 config.toml。",
+                    )
+                    .into(),
+            ],
             area,
         );
         return;
@@ -371,18 +464,27 @@ fn draw_hosts(
                 Cell::from(host.environment.clone()),
                 Cell::from(format!("{:?}", host.transport)),
                 Cell::from(if host.transport == TransportKind::Telnet {
-                    "INSECURE".to_string()
-                } else if agent {
-                    format!(
-                        "Vault {} / Agent OK",
-                        if app.vault_locked {
-                            "locked"
-                        } else {
-                            "unlocked"
-                        }
-                    )
+                    app.language.text("INSECURE", "不安全").to_string()
+                } else if host.auth == crate::config::AuthMode::ExternalAgent {
+                    if agent {
+                        app.language.text("Agent available", "Agent 可用").into()
+                    } else {
+                        app.language
+                            .text("Agent unavailable", "Agent 不可用")
+                            .into()
+                    }
+                } else if matches!(
+                    host.auth,
+                    crate::config::AuthMode::VaultPassword | crate::config::AuthMode::VaultKey
+                ) {
+                    match (app.vault_locked, app.language) {
+                        (true, crate::config::UiLanguage::En) => "Vault locked".into(),
+                        (false, crate::config::UiLanguage::En) => "Vault unlocked".into(),
+                        (true, crate::config::UiLanguage::ZhCn) => "Vault 已锁定".into(),
+                        (false, crate::config::UiLanguage::ZhCn) => "Vault 已解锁".into(),
+                    }
                 } else {
-                    "Agent unavailable".into()
+                    app.language.text("OpenSSH config", "OpenSSH 配置").into()
                 }),
             ])
         })
@@ -398,18 +500,33 @@ fn draw_hosts(
         ],
     )
     .header(
-        Row::new(["Alias", "Number", "Environment", "Transport", "State"]).style(
+        Row::new([
+            app.language.text("Alias", "别名"),
+            app.language.text("Number", "编号"),
+            app.language.text("Environment", "环境"),
+            app.language.text("Transport", "传输"),
+            app.language.text("State", "状态"),
+        ])
+        .style(if app.no_color {
+            Style::default()
+        } else {
             Style::default()
                 .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+                .add_modifier(Modifier::BOLD)
+        }),
     )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Hosts — filter: {}", app.search)),
-    )
-    .row_highlight_style(Style::default().bg(Color::DarkGray));
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        "{} — {}: {}",
+        app.language.text("Hosts", "主机"),
+        app.language.text("filter", "筛选"),
+        app.search
+    )))
+    .row_highlight_style(if app.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::DarkGray)
+    })
+    .highlight_symbol(if app.no_color { " > " } else { "" });
     let mut state = TableState::default()
         .with_selected(Some(app.selected.min(aliases.len().saturating_sub(1))));
     frame.render_stateful_widget(table, area, &mut state);

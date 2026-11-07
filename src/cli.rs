@@ -50,7 +50,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Action {
-    Init,
+    Init {
+        #[arg(long)]
+        lang: Option<String>,
+    },
     Status,
     Unlock,
     Lock,
@@ -98,7 +101,9 @@ enum HostAction {
 
 #[derive(Debug, Args)]
 struct HostAdd {
-    alias: String,
+    alias: Option<String>,
+    #[arg(long)]
+    interactive: bool,
     #[arg(long)]
     hostname: Option<String>,
     #[arg(long)]
@@ -134,7 +139,17 @@ struct HostAdd {
 #[derive(Debug, Subcommand)]
 enum VaultAction {
     ChangePassword,
-    SetSudo { host: String },
+    SetSudo {
+        host: String,
+    },
+    SetSshPassword {
+        host: String,
+    },
+    ImportKey {
+        host: String,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -196,6 +211,72 @@ enum ApprovalAction {
     Approve { id: String },
 }
 
+pub async fn askpass_entry(arguments: Vec<std::ffi::OsString>) -> ExitCode {
+    match run_askpass(arguments).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("remxo askpass [{:?}]: {}", error.code, error.message);
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn run_askpass(arguments: Vec<std::ffi::OsString>) -> Result<()> {
+    let prompt = match arguments.as_slice() {
+        [prompt] => prompt.as_os_str(),
+        _ => {
+            return Err(AppError::invalid_argument(
+                "the internal ASKPASS helper accepts exactly one OpenSSH prompt",
+            ));
+        }
+    };
+    validate_askpass_prompt(Some(prompt))?;
+    let config = std::env::var_os("REMXO_ASKPASS_CONFIG")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::InvalidConfig,
+                "the internal ASKPASS helper was not launched by Remxo",
+            )
+        })?;
+    let paths = AppPaths::new(Some(config))?;
+    let target = required_askpass_environment("REMXO_ASKPASS_TARGET")?;
+    let pending_host = std::env::var_os("REMXO_ASKPASS_PENDING_HOST")
+        .map(|value| {
+            let value = value.into_string().map_err(|_| {
+                AppError::invalid_argument("invalid internal ASKPASS pending-host context")
+            })?;
+            serde_json::from_str::<Host>(&value).map_err(|_| {
+                AppError::invalid_argument("invalid internal ASKPASS pending-host context")
+            })
+        })
+        .transpose()?;
+    let client = BrokerClient::new(paths);
+    let response = client
+        .call(RpcRequest::SecretForAuth {
+            target,
+            pending_host,
+            private_key: false,
+        })
+        .await?;
+    let RpcPayload::Secret { kind, value } = response else {
+        return Err(AppError::internal("unexpected askpass response"));
+    };
+    let value = Zeroizing::new(value);
+    if kind != crate::credential::SSH_PASSWORD_KIND {
+        return Err(AppError::new(
+            ErrorCode::AuthenticationFailed,
+            "the requested credential is not an SSH password or private key passphrase",
+        ));
+    }
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(value.as_bytes())
+        .and_then(|_| stdout.write_all(b"\n"))
+        .and_then(|_| stdout.flush())
+        .map_err(|error| AppError::io("send secret to OpenSSH askpass", error))
+}
+
 pub async fn main_entry() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
@@ -216,20 +297,50 @@ pub async fn main_entry() -> ExitCode {
 async fn dispatch(mut cli: Cli) -> Result<u8> {
     let paths = AppPaths::new(cli.config.clone())?;
     match cli.action.take() {
-        Some(Action::Init) => {
-            if paths.config.exists() || paths.vault().exists() {
+        Some(Action::Init { lang }) => {
+            if paths.vault().exists() {
                 return Err(AppError::new(
                     ErrorCode::AlreadyExists,
-                    "configuration or vault already exists; init will not overwrite it",
+                    "Vault already exists; init will not overwrite it. Run 'remxo status' to inspect the current installation or choose a fresh --config path",
                 ));
             }
-            let password = hidden_password_confirmed("New master password: ")?;
-            Config::initialize(&paths.config)?;
-            VaultSession::initialize(&paths.vault(), &password)?;
+            if paths.config.exists() {
+                Config::load(&paths.config)?;
+            }
+            let language = choose_language(lang, cli.json)?;
+            if !cli.json {
+                eprintln!(
+                    "{}",
+                    if language == crate::config::UiLanguage::ZhCn {
+                        "主密码至少需要 12 字节，重启后需要用它解锁；校验成功前不会写入配置或 Vault"
+                    } else {
+                        "Master password must contain at least 12 bytes. It is required to unlock after restarts; no configuration or Vault is written until both entries pass validation."
+                    }
+                );
+            }
+            let password = hidden_password_confirmed_with(
+                language.text("New master password: ", "新主密码："),
+                language.text("Confirm password: ", "确认主密码："),
+            )?;
+            let recovered = initialize_data_directory(&paths, &password, language)?;
+            let message = match (recovered, language) {
+                (true, crate::config::UiLanguage::ZhCn) => {
+                    "已恢复初始化：保留了原配置并创建了新的 Locked Vault。下一步运行 remxo unlock"
+                }
+                (false, crate::config::UiLanguage::ZhCn) => {
+                    "初始化完成，Vault 处于锁定状态。下一步运行 remxo unlock"
+                }
+                (true, crate::config::UiLanguage::En) => {
+                    "Resumed incomplete initialization: existing configuration was preserved and a new Vault was created in the Locked state. Next: remxo unlock"
+                }
+                (false, crate::config::UiLanguage::En) => {
+                    "Initialized config and locked Vault. Next: remxo unlock"
+                }
+            };
             emit(
-                &serde_json::json!({"initialized": true, "vault_locked": true}),
+                &serde_json::json!({"initialized": true, "recovered": recovered, "vault_locked": true}),
                 cli.json,
-                "Initialized config and locked Vault. Host inventory is empty.",
+                message,
             )?;
         }
         Some(Action::Broker) => crate::broker::serve(paths).await?,
@@ -380,6 +491,65 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
                 "Sudo credential stored in Vault; its value was not displayed.",
             )?;
         }
+        Some(Action::Vault(VaultAction::SetSshPassword { host })) => {
+            let config = Config::load(&paths.config)?;
+            let target = resolve_target(&config, &host)?;
+            if target.host.auth != crate::config::AuthMode::VaultPassword
+                && target.host.auth != crate::config::AuthMode::VaultKey
+            {
+                return Err(AppError::new(
+                    ErrorCode::InvalidConfig,
+                    "set the host authentication mode to vault-password (SSH login password) or vault-key (key passphrase) before storing a password",
+                ));
+            }
+            let stem = target.host.credential.as_deref().unwrap_or(&target.alias);
+            let name = crate::credential::ssh_credential_name(stem);
+            let password = hidden_password("SSH password or private key passphrase (hidden): ")?;
+            let client = connected_client(paths.clone()).await?;
+            expect_ack(
+                client
+                    .call(RpcRequest::SetCredential {
+                        name,
+                        kind: "ssh-password".into(),
+                        value: password.to_string(),
+                    })
+                    .await?,
+            )?;
+            emit(
+                &serde_json::json!({"configured": true}),
+                cli.json,
+                "SSH password or key passphrase encrypted in Vault; it was not displayed.",
+            )?;
+        }
+        Some(Action::Vault(VaultAction::ImportKey { host, path })) => {
+            let config = Config::load(&paths.config)?;
+            let target = resolve_target(&config, &host)?;
+            if target.host.auth != crate::config::AuthMode::VaultKey {
+                return Err(AppError::new(
+                    ErrorCode::InvalidConfig,
+                    "set auth=vault-key for this host in the wizard or configuration before importing the key",
+                ));
+            }
+            let path = match path {
+                Some(path) => path,
+                None => prompt_text("Private key file (PEM, not .pub): ")?,
+            };
+            let path = std::path::absolute(path)
+                .map_err(|error| AppError::io("resolve private key import path", error))?;
+            let stem = target.host.credential.as_deref().unwrap_or(&target.alias);
+            let name = crate::credential::key_credential_name(stem);
+            let client = connected_client(paths.clone()).await?;
+            expect_ack(
+                client
+                    .call(RpcRequest::ImportPrivateKey { name, path })
+                    .await?,
+            )?;
+            emit(
+                &serde_json::json!({"imported": true}),
+                cli.json,
+                "Private key encrypted in Vault; only its location and format were validated, not its contents.",
+            )?;
+        }
         Some(Action::Backup(BackupAction::Create { path })) => {
             let password = hidden_password_confirmed("New backup password: ")?;
             backup::create(&paths.config, &paths.vault(), &path, &password)?;
@@ -452,17 +622,27 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             require_terminal()?;
             let config = Config::load(&paths.config)?;
             let target = resolve_target(&config, &target)?;
-            return Ok(transfer::sftp(&target.host)?.clamp(0, 255) as u8);
+            return Ok(transfer::sftp(
+                &target.host,
+                crate::transport::AuthenticationContext::registered(
+                    paths.clone(),
+                    &target.alias,
+                    &target.host,
+                )
+                .as_ref(),
+            )
+            .await?
+            .clamp(0, 255) as u8);
         }
         Some(Action::Doctor) => doctor(&paths, cli.json)?,
         Some(Action::Tui) => {
-            require_terminal()?;
-            crate::tui::run(paths).await?;
+            require_tui_terminal()?;
+            crate::tui::run_with_options(paths, cli.no_color).await?;
         }
         Some(Action::External(values)) => return external(paths, &cli, values).await,
         None => {
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                crate::tui::run(paths).await?;
+                crate::tui::run_with_options(paths, cli.no_color).await?;
             } else {
                 return Err(AppError::invalid_argument(
                     "no TTY detected; use remxo --help or provide <target> <command...> (TUI was not started)",
@@ -667,37 +847,51 @@ fn parse_profile_arguments(
 }
 
 async fn host_add(paths: &AppPaths, cli: &Cli, add: HostAdd) -> Result<()> {
-    let mut config = Config::load(&paths.config)?;
+    let needs_form = add.interactive
+        || add.alias.is_none()
+        || (add.ssh_alias.is_none() && add.hostname.is_none());
+    if needs_form {
+        if cli.json {
+            return Err(AppError::invalid_argument(
+                "interactive host setup cannot be combined with --json; provide --ssh-alias or --hostname for automation",
+            ));
+        }
+        require_tui_terminal()?;
+        let alias = add.alias.clone();
+        let initial = host_from_args(&add)?;
+        let result = crate::tui_wizard::run(paths, alias, Some(initial), cli.no_color).await?;
+        emit(
+            &serde_json::json!({"added": result.saved_alias, "message": result.message}),
+            false,
+            &result.message,
+        )
+    } else {
+        host_add_flags(paths, cli, add).await
+    }
+}
+
+fn host_from_args(add: &HostAdd) -> Result<Host> {
     let transport = parse_transport(&add.transport)?;
-    if transport == TransportKind::Telnet && !add.ack_insecure {
-        return Err(AppError::new(
-            ErrorCode::InsecureTransport,
-            "Telnet is plaintext; adding it requires explicit --ack-insecure",
-        ));
-    }
-    if config.hosts.contains_key(&add.alias) {
-        return Err(AppError::new(
-            ErrorCode::AlreadyExists,
-            "host alias already exists",
-        ));
-    }
-    let host = Host {
+    let alias = add.alias.clone().unwrap_or_default();
+    let auth = parse_auth(&add.auth)?;
+    Ok(Host {
         number: add.number,
         transport,
-        ssh_alias: add.ssh_alias,
-        hostname: add.hostname,
+        ssh_alias: add.ssh_alias.clone(),
+        hostname: add.hostname.clone(),
         port: add.port.unwrap_or(if transport == TransportKind::Telnet {
             23
         } else {
             22
         }),
-        username: add.username,
+        username: add.username.clone(),
         platform: parse_platform(&add.platform)?,
         shell: parse_shell(&add.shell)?,
-        auth: parse_auth(&add.auth)?,
-        environment: add.environment,
+        auth,
+        environment: add.environment.clone(),
         tags: add
             .tags
+            .clone()
             .unwrap_or_default()
             .split(',')
             .filter(|tag| !tag.is_empty())
@@ -706,20 +900,39 @@ async fn host_add(paths: &AppPaths, cli: &Cli, add: HostAdd) -> Result<()> {
         raw_mode: parse_raw_mode(&add.raw_mode)?,
         approval: parse_approval(&add.approval)?,
         insecure_acknowledged: add.ack_insecure,
-        sudo_credential: add.configure_sudo.then(|| add.alias.clone()),
-        credential: None,
+        sudo_credential: add
+            .configure_sudo
+            .then(|| crate::credential::sudo_credential_name(&alias)),
+        credential: matches!(
+            auth,
+            crate::config::AuthMode::VaultPassword | crate::config::AuthMode::VaultKey
+        )
+        .then_some(alias),
         prompt: None,
-    };
-    host.validate(&add.alias)?;
-    config.hosts.insert(add.alias.clone(), host);
-    config.save(&paths.config)?;
+    })
+}
+
+async fn host_add_flags(paths: &AppPaths, cli: &Cli, add: HostAdd) -> Result<()> {
+    let alias = add
+        .alias
+        .as_deref()
+        .ok_or_else(|| AppError::invalid_argument("alias is required"))?;
+    if parse_transport(&add.transport)? == TransportKind::Telnet && !add.ack_insecure {
+        return Err(AppError::new(
+            ErrorCode::InsecureTransport,
+            "Telnet is plaintext; adding it requires explicit --ack-insecure",
+        ));
+    }
+    let host = host_from_args(&add)?;
+    let sudo_credential = host.sudo_credential.clone();
+    crate::host::add_host(paths, alias, host)?;
     if add.configure_sudo {
         let password = hidden_password("Sudo password (hidden): ")?;
         let client = connected_client(paths.clone()).await?;
         expect_ack(
             client
                 .call(RpcRequest::SetCredential {
-                    name: add.alias.clone(),
+                    name: sudo_credential.unwrap_or_else(|| alias.to_string()),
                     kind: "sudo-password".into(),
                     value: password.to_string(),
                 })
@@ -727,7 +940,7 @@ async fn host_add(paths: &AppPaths, cli: &Cli, add: HostAdd) -> Result<()> {
         )?;
     }
     emit(
-        &serde_json::json!({"added": add.alias}),
+        &serde_json::json!({"added": alias}),
         cli.json,
         "Host saved (previous config backed up when present).",
     )
@@ -852,6 +1065,34 @@ fn emit(value: &impl Serialize, json: bool, human: &str) -> Result<()> {
     Ok(())
 }
 
+fn initialize_data_directory(
+    paths: &AppPaths,
+    master_password: &str,
+    language: crate::config::UiLanguage,
+) -> Result<bool> {
+    if paths.vault().exists() {
+        return Err(AppError::new(
+            ErrorCode::AlreadyExists,
+            "Vault already exists; init will not overwrite it. Run 'remxo status' to inspect the current installation or choose a fresh --config path",
+        ));
+    }
+    if master_password.len() < 12 {
+        return Err(AppError::invalid_argument(
+            "master password must contain at least 12 bytes; no files were written, so you can retry remxo init",
+        ));
+    }
+    let recovered = paths.config.exists();
+    // A previous interrupted initialization can leave config without Vault.
+    // Preserve any valid existing config and only finish the missing Vault half.
+    if recovered {
+        Config::load(&paths.config)?;
+    } else {
+        Config::initialize_with_language(&paths.config, language)?;
+    }
+    VaultSession::initialize(&paths.vault(), master_password)?;
+    Ok(recovered)
+}
+
 fn require_terminal() -> Result<()> {
     if std::io::stdin().is_terminal() {
         Ok(())
@@ -862,6 +1103,102 @@ fn require_terminal() -> Result<()> {
     }
 }
 
+fn choose_language(request: Option<String>, json: bool) -> Result<crate::config::UiLanguage> {
+    match request {
+        Some(language) => crate::config::UiLanguage::from_arg(&language),
+        None if json || !std::io::stdin().is_terminal() => Ok(crate::config::UiLanguage::En),
+        None => {
+            let input = prompt_text("Language / UI 语言 [English / zh-CN]: ")?;
+            let input = input.to_string_lossy();
+            let input = input.trim();
+            if input.is_empty() {
+                Ok(crate::config::UiLanguage::En)
+            } else {
+                crate::config::UiLanguage::from_arg(input)
+            }
+        }
+    }
+}
+
+fn required_askpass_environment(name: &str) -> Result<String> {
+    std::env::var_os(name)
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::InvalidConfig,
+                "the internal ASKPASS helper is missing its Remxo launch context",
+            )
+        })?
+        .into_string()
+        .map_err(|_| AppError::invalid_argument("invalid internal ASKPASS launch context"))
+}
+
+fn validate_askpass_prompt(prompt: Option<&std::ffi::OsStr>) -> Result<()> {
+    let prompt = prompt.ok_or_else(|| {
+        AppError::invalid_argument("askpass requires a password or private-key passphrase prompt")
+    })?;
+    let prompt = prompt.to_string_lossy().to_ascii_lowercase();
+    if prompt.len() > 512 {
+        return Err(AppError::invalid_argument("askpass prompt is too long"));
+    }
+    if prompt.contains("yes/no")
+        || prompt.contains("fingerprint")
+        || prompt.contains("continue connecting")
+        || prompt.contains("host key")
+    {
+        return Err(AppError::new(
+            ErrorCode::HostKeyFailed,
+            "host key confirmation requires a human through interactive OpenSSH; Remxo will not respond through askpass",
+        ));
+    }
+    if prompt.contains("verification code")
+        || prompt.contains("one-time password")
+        || prompt.contains("otp")
+        || prompt.contains("pin for")
+        || prompt.contains("token")
+    {
+        return Err(AppError::new(
+            ErrorCode::UnsupportedOperation,
+            "MFA, OTP, or hardware PIN prompts are not supported by this ASKPASS broker",
+        ));
+    }
+    if !prompt.contains("password") && !prompt.contains("passphrase") {
+        return Err(AppError::new(
+            ErrorCode::UnsupportedOperation,
+            "unexpected ASKPASS prompt; only password or private-key passphrase prompts are accepted",
+        ));
+    }
+    Ok(())
+}
+
+fn require_tui_terminal() -> Result<()> {
+    require_terminal()?;
+    if std::io::stdout().is_terminal() {
+        Ok(())
+    } else {
+        Err(AppError::invalid_argument(
+            "interactive TUI requires both stdin and stdout to be terminals; the TUI was not started",
+        ))
+    }
+}
+
+fn prompt_text(prompt: &str) -> Result<PathBuf> {
+    require_terminal()?;
+    eprint!("{prompt}");
+    std::io::stderr()
+        .flush()
+        .map_err(|error| AppError::io("display prompt", error))?;
+    let mut input = String::with_capacity(64);
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|error| AppError::io("read path input", error))?;
+    if input.is_empty() || input.len() > 4096 {
+        return Err(AppError::invalid_argument(
+            "input path must be non-empty and at most 4096 bytes",
+        ));
+    }
+    Ok(PathBuf::from(input.trim_end_matches(['\r', '\n'])))
+}
+
 fn hidden_password(prompt: &str) -> Result<Zeroizing<String>> {
     require_terminal()?;
     rpassword::prompt_password(prompt)
@@ -870,8 +1207,20 @@ fn hidden_password(prompt: &str) -> Result<Zeroizing<String>> {
 }
 
 fn hidden_password_confirmed(prompt: &str) -> Result<Zeroizing<String>> {
+    hidden_password_confirmed_with(prompt, "Confirm password: ")
+}
+
+fn hidden_password_confirmed_with(
+    prompt: &str,
+    confirmation_prompt: &str,
+) -> Result<Zeroizing<String>> {
     let password = hidden_password(prompt)?;
-    let confirmation = hidden_password("Confirm password: ")?;
+    if password.len() < 12 {
+        return Err(AppError::invalid_argument(
+            "password must contain at least 12 bytes; please retry with a longer password",
+        ));
+    }
+    let confirmation = hidden_password(confirmation_prompt)?;
     if password.as_str() != confirmation.as_str() {
         return Err(AppError::invalid_argument("passwords do not match"));
     }
@@ -1033,6 +1382,116 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn askpass_accepts_only_password_or_passphrase_prompts() {
+        assert!(
+            validate_askpass_prompt(Some(std::ffi::OsStr::new("user@host's password: "))).is_ok()
+        );
+        assert!(
+            validate_askpass_prompt(Some(std::ffi::OsStr::new(
+                "Enter passphrase for key '/tmp/test': "
+            )))
+            .is_ok()
+        );
+        for prompt in [
+            "Are you sure you want to continue connecting (yes/no)?",
+            "The fingerprint is SHA256:test",
+            "Verification code:",
+            "One-time password:",
+            "OTP:",
+            "PIN for test key:",
+            "Token:",
+            "Unexpected prompt:",
+        ] {
+            assert!(
+                validate_askpass_prompt(Some(std::ffi::OsStr::new(prompt))).is_err(),
+                "unexpected prompt category was accepted"
+            );
+        }
+        assert!(validate_askpass_prompt(None).is_err());
+    }
+
+    #[test]
+    fn short_password_leaves_no_files_and_allows_retry() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        let error =
+            initialize_data_directory(&paths, "short", crate::config::UiLanguage::En).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(!paths.config.exists());
+        assert!(!paths.vault().exists());
+        let recovered = initialize_data_directory(
+            &paths,
+            "a long test master password",
+            crate::config::UiLanguage::En,
+        )
+        .unwrap_or_else(|error| panic!("initialize: {error}"));
+        assert!(!recovered);
+        assert!(paths.config.exists());
+        assert!(paths.vault().exists());
+        let duplicate = initialize_data_directory(
+            &paths,
+            "another long test password",
+            crate::config::UiLanguage::En,
+        )
+        .unwrap_err();
+        assert_eq!(duplicate.code, ErrorCode::AlreadyExists);
+    }
+
+    #[test]
+    fn interrupted_init_preserves_a_valid_config_and_recovers_only_the_vault() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        Config::initialize(&paths.config).unwrap_or_else(|error| panic!("config: {error}"));
+        let mut config =
+            Config::load(&paths.config).unwrap_or_else(|error| panic!("load: {error}"));
+        config.hosts.insert(
+            "preserved-host".to_string(),
+            Host {
+                hostname: Some("192.0.2.10".into()),
+                ..Host::default()
+            },
+        );
+        config
+            .save(&paths.config)
+            .unwrap_or_else(|error| panic!("save: {error}"));
+        let original =
+            std::fs::read(&paths.config).unwrap_or_else(|error| panic!("read config: {error}"));
+        let recovered = initialize_data_directory(
+            &paths,
+            "a long test master password",
+            crate::config::UiLanguage::En,
+        )
+        .unwrap_or_else(|error| panic!("recover: {error}"));
+        assert!(recovered);
+        let preserved =
+            std::fs::read(&paths.config).unwrap_or_else(|error| panic!("read preserved: {error}"));
+        assert_eq!(original, preserved);
+        assert!(paths.vault().exists());
+        let vault = VaultSession::load(&paths.vault())
+            .unwrap_or_else(|error| panic!("load vault: {error}"));
+        assert!(!vault.is_unlocked());
+    }
+
+    #[test]
+    fn recovery_never_overwrites_invalid_config_or_an_existing_vault() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        std::fs::write(&paths.config, "version = 1\nunknown = true\n")
+            .unwrap_or_else(|error| panic!("write partial config: {error}"));
+        let error = initialize_data_directory(
+            &paths,
+            "a long test master password",
+            crate::config::UiLanguage::En,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert!(!paths.vault().exists());
+    }
+
     #[test]
     fn duration_parser_is_bounded() {
         assert_eq!(parse_duration("500ms").ok(), Some(1));

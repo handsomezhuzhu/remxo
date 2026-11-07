@@ -213,6 +213,213 @@ mod unix {
         );
     }
 
+    #[tokio::test]
+    async fn fake_ssh_vault_password_uses_real_askpass_without_logging_the_secret() {
+        use remxo::config::AuthMode;
+        use remxo::vault::{Credential, VaultSession};
+        use std::collections::BTreeMap;
+
+        let fixture = Fixture::new();
+        let master = "TEST-ONLY-fake-master-password";
+        let login = "TEST-ONLY-fake-vault-login";
+        let mut vault = VaultSession::initialize(&fixture.paths.vault(), master)
+            .unwrap_or_else(|error| panic!("vault: {error}"));
+        vault
+            .unlock(master)
+            .unwrap_or_else(|error| panic!("unlock: {error}"));
+        vault
+            .put_record(
+                "prod:ssh",
+                Credential {
+                    kind: "ssh-password".into(),
+                    value: login.into(),
+                    metadata: BTreeMap::new(),
+                },
+            )
+            .unwrap_or_else(|error| panic!("credential: {error}"));
+        let mut config =
+            Config::load(&fixture.paths.config).unwrap_or_else(|error| panic!("load: {error}"));
+        let host = config.hosts.get_mut("prod").expect("fixture host");
+        host.auth = AuthMode::VaultPassword;
+        host.credential = Some("prod".into());
+        config
+            .save(&fixture.paths.config)
+            .unwrap_or_else(|error| panic!("save: {error}"));
+
+        let argv_log = fixture.root.join("vault-argv");
+        let context_log = fixture.root.join("vault-context");
+        let progress_log = fixture.root.join("vault-progress");
+        let fake = fixture.executable(
+            "fake-vault-ssh",
+            &format!(
+                "[ \"$SSH_ASKPASS_REQUIRE\" = force ] || exit 41\n\
+                 [ \"$REMXO_ASKPASS_TARGET\" = prod ] || exit 42\n\
+                 [ -z \"${{REMXO_ASKPASS_PENDING_HOST+x}}\" ] || exit 43\n\
+                 printf 'before-password\\n' >> '{}'\n\
+                 reply=$(\"$SSH_ASKPASS\" \"prod's password: \") || exit 44\n\
+                 printf 'after-password\\n' >> '{}'\n\
+                 [ -n \"$reply\" ] || exit 45\n\
+                 unset reply\n\
+                 for prompt in 'continue connecting (yes/no)?' 'Verification code:' 'Unexpected prompt:'; do\n\
+                     if \"$SSH_ASKPASS\" \"$prompt\" >/dev/null 2>/dev/null; then exit 46; fi\n\
+                     printf 'rejected-prompt\\n' >> '{}'\n\
+                 done\n\
+                 printf '%s\\n' \"$@\" > '{}'\n\
+                 printf '%s\\n' \"$REMXO_ASKPASS_TARGET\" \"$SSH_ASKPASS_REQUIRE\" > '{}'\n\
+                 printf 'vault-auth-ok\\n'",
+                progress_log.display(),
+                progress_log.display(),
+                progress_log.display(),
+                argv_log.display(),
+                context_log.display()
+            ),
+        );
+        let audit_path = fixture.paths.audit();
+        let mut daemon = std::process::Command::new(env!("CARGO_BIN_EXE_remxo"));
+        let daemon_status = daemon
+            .arg("--config")
+            .arg(&fixture.paths.config)
+            .env("REMXO_SSH", &fake)
+            .arg("__broker-daemon")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn broker: {error}"))
+            .wait()
+            .unwrap_or_else(|error| panic!("wait for broker parent: {error}"));
+        assert!(daemon_status.success());
+        let client = BrokerClient::new(fixture.paths.clone());
+        let mut ready = false;
+        for _ in 0..100 {
+            if client.ping().await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(ready, "test broker daemon did not start");
+        let _ = client
+            .call(RpcRequest::Unlock {
+                password: master.into(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("RPC unlock: {error}"));
+        let output = fixture
+            .remxo()
+            .env("REMXO_SSH", fake)
+            .args(["--json", "prod", "true"])
+            .output()
+            .unwrap_or_else(|error| panic!("run: {error}"));
+        fixture.shutdown().await;
+        let progress = fs::read_to_string(progress_log).unwrap_or_default();
+        assert!(
+            output.status.success(),
+            "stderr={}; stdout={}; progress={progress}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report = json_stdout(&output.stdout);
+        assert_eq!(report["remote_exit_code"], 0);
+        let argv = fs::read_to_string(argv_log).unwrap_or_default();
+        assert!(argv.contains("BatchMode=no"));
+        assert!(argv.contains("NumberOfPasswordPrompts=1"));
+        assert!(argv.contains("PreferredAuthentications=password"));
+        assert!(argv.contains("KbdInteractiveAuthentication=no"));
+        assert!(!argv.contains("BatchMode=yes"));
+        assert!(!argv.contains(login));
+        assert!(!argv.contains("__askpass"));
+        assert_eq!(
+            fs::read_to_string(context_log).unwrap_or_default(),
+            "prod\nforce\n"
+        );
+        for contents in [argv, fs::read_to_string(audit_path).unwrap_or_default()] {
+            assert!(!contents.contains(login));
+        }
+
+        fixture.shutdown().await;
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+        let mut config = Config::load(&fixture.paths.config)
+            .unwrap_or_else(|error| panic!("load key host: {error}"));
+        config.hosts.get_mut("prod").expect("fixture host").auth = AuthMode::VaultKey;
+        config
+            .save(&fixture.paths.config)
+            .unwrap_or_else(|error| panic!("save key host: {error}"));
+        let mut vault = VaultSession::load(&fixture.paths.vault())
+            .unwrap_or_else(|error| panic!("load vault: {error}"));
+        vault
+            .unlock(master)
+            .unwrap_or_else(|error| panic!("unlock key vault: {error}"));
+        vault
+            .put_record(
+                "prod:key",
+                Credential {
+                    kind: "ssh-private-key".into(),
+                    value: "-----BEGIN OPENSSH PRIVATE KEY-----\ndGVzdC1vbmx5LW5vdC1hLXJlYWwta2V5\n-----END OPENSSH PRIVATE KEY-----\n".into(),
+                    metadata: BTreeMap::new(),
+                },
+            )
+            .unwrap_or_else(|error| panic!("private key: {error}"));
+        let key_path_log = fixture.root.join("key-path");
+        let sleeping_fake = fixture.executable(
+            "fake-vault-key-timeout",
+            &format!(
+                "while [ \"$#\" -gt 0 ]; do\n\
+                    if [ \"$1\" = -i ]; then printf '%s\\n' \"$2\" > '{}'; break; fi\n\
+                    shift\n\
+                 done\n\
+                 sleep 2",
+                key_path_log.display()
+            ),
+        );
+        let mut daemon = std::process::Command::new(env!("CARGO_BIN_EXE_remxo"));
+        let daemon_status = daemon
+            .arg("--config")
+            .arg(&fixture.paths.config)
+            .env("REMXO_SSH", &sleeping_fake)
+            .arg("__broker-daemon")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn key broker: {error}"))
+            .wait()
+            .unwrap_or_else(|error| panic!("wait for key broker parent: {error}"));
+        assert!(daemon_status.success());
+        let mut ready = false;
+        for _ in 0..100 {
+            if client.ping().await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(ready, "key test broker daemon did not start");
+        let _ = client
+            .call(RpcRequest::Unlock {
+                password: master.into(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("RPC key unlock: {error}"));
+        let output = fixture
+            .remxo()
+            .args(["--json", "--timeout", "1s", "prod", "true"])
+            .output()
+            .unwrap_or_else(|error| panic!("timeout run: {error}"));
+        fixture.shutdown().await;
+        assert!(!output.status.success());
+        assert_eq!(json_stdout(&output.stdout)["error"]["code"], "timeout");
+        let key_path = fs::read_to_string(key_path_log).unwrap_or_default();
+        assert!(
+            !key_path.trim().is_empty(),
+            "fake did not receive a key path"
+        );
+        assert!(
+            !Path::new(key_path.trim()).exists(),
+            "temporary private key survived transport timeout"
+        );
+    }
+
     #[test]
     fn direct_hostname_is_always_an_argv_not_a_local_shell() {
         let host = Host {

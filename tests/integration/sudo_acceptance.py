@@ -73,7 +73,7 @@ class SudoFixture(SshdFixture):
         self.transcripts = []
         baseline = self.config.read_bytes()
         self.config.unlink()
-        self.hidden("real fixture init", ["init"], [
+        self.hidden("real fixture init", ["init", "--lang", "en"], [
             (b"New master password: ", self.master + b"\n"),
             (b"Confirm password: ", self.master + b"\n"),
         ])

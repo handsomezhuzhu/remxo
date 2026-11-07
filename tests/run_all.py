@@ -138,8 +138,16 @@ def main():
         elif suite in ("real", "sudo") and not docker_available(env):
             results.append(skipped(suite, "Docker daemon unavailable; real SSH tests were NOT_RUN"))
         else:
-            script = {"fake": "fault_and_stress.py", "pty": "pty_acceptance.py", "real": "sshd_acceptance.py", "sudo": "sudo_acceptance.py"}[suite]
-            results.append(execute(suite, [sys.executable, ROOT / "tests" / "integration" / script], env))
+            scripts = {
+                "fake": ["fault_and_stress.py"],
+                "pty": ["pty_acceptance.py"],
+                "real": ["sshd_acceptance.py", "vault_auth_acceptance.py"],
+                "sudo": ["sudo_acceptance.py"],
+            }[suite]
+            for script in scripts:
+                results.append(execute(suite, [sys.executable, ROOT / "tests" / "integration" / script], env))
+                if results[-1]["status"] != "passed":
+                    break
             if results[-1]["status"] != "passed":
                 break
 

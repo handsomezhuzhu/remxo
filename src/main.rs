@@ -6,6 +6,10 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().collect::<Vec<_>>();
+    if std::env::var_os("REMXO_ASKPASS_CONFIG").is_some() {
+        let prompt = arguments.into_iter().skip(1).collect();
+        return run_runtime(remxo::cli::askpass_entry(prompt));
+    }
     if let Some(config) = detached_broker_config(&arguments) {
         let paths = match AppPaths::new(config) {
             Ok(paths) => paths,
