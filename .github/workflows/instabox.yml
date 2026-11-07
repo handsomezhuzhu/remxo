@@ -1,0 +1,44 @@
+name: Instabox CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '16 3 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remxo-instabox-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-suite:
+    name: ${{ matrix.name }}
+    # Guard both resource usage and repository trust on public fork PRs.
+    # A skipped fork job is an explicit Not Run, not a successful test.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - name: Rust checks / release
+            command: rustup component add rustfmt clippy && cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-targets -- --test-threads=1 && cargo build --release
+          - name: Dependency and Python audit
+            command: python3 -m compileall -q tests/integration tests/run_all.py && cargo install cargo-audit --locked && cargo audit
+          - name: Fault PTY and TUI
+            command: cargo build && python3 tests/run_all.py --only fake && python3 tests/run_all.py --only pty
+          - name: Real SSH and sudo
+            command: cargo build && python3 tests/run_all.py --only real --require-real-ssh && python3 tests/run_all.py --only sudo --require-real-ssh
+          - name: Concurrency and stability
+            command: cargo build && python3 tests/integration/fault_and_stress.py && for iteration in $(seq 1 20); do python3 tests/integration/fault_and_stress.py FaultAndStressTests.test_eight_concurrent_json_clients_execute_once_with_unique_request_ids || exit 1; done && python3 tests/integration/check_cleanup.py
+    runs-on: instabox-medium
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: '${{ matrix.name }}'
+        shell: bash
+        run: ${{ matrix.command }}
