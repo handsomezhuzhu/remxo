@@ -38,7 +38,7 @@ function assertCoreFile(file, platform) {
   } catch (error) {
     throw new LauncherError(`native core is missing or not executable: ${file}`, { cause: error });
   }
-  return file;
+  return fs.realpathSync(file);
 }
 
 function supports(manifest, field, value) {
