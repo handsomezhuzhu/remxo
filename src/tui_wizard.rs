@@ -67,6 +67,7 @@ const ACTION_SAVE_EXIT: usize = 19;
 const ACTION_EXIT: usize = 20;
 const LAST_FOCUS: usize = ACTION_EXIT;
 
+#[derive(Debug, Clone)]
 struct Draft {
     alias: TextInput,
     mode: ConnectionMode,
@@ -549,6 +550,7 @@ pub struct WizardResult {
 struct Wizard {
     draft: Draft,
     focused: usize,
+    paths: AppPaths,
     message: String,
     failed: bool,
     tested: bool,
@@ -560,6 +562,8 @@ struct Wizard {
     host_key_trusted: bool,
     host_key_confirm_pending: bool,
     host_key_job: Option<HostKeyJob>,
+    action_job: Option<ActionJob>,
+    pending_sudo: Option<(ActionJobKind, String, Host)>,
     retry_attempts: u32,
     client: BrokerClient,
     original: Option<Host>,
@@ -591,6 +595,7 @@ impl Wizard {
             client: BrokerClient::new(paths.clone()),
             draft,
             focused: 0,
+            paths: paths.clone(),
             message: if editing {
                 language.text(
                     "Edit connection fields; unchanged credentials are preserved. Enter moves to save or save-and-test.",
@@ -613,6 +618,8 @@ impl Wizard {
             host_key_trusted: false,
             host_key_confirm_pending: false,
             host_key_job: None,
+            action_job: None,
+            pending_sudo: None,
             retry_attempts: config.settings.retry_attempts.clamp(1, 10),
             original,
         })
@@ -738,6 +745,41 @@ struct HostKeyJob {
     receiver: Option<oneshot::Receiver<Result<HostKeyJobOutput>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionJobKind {
+    Test,
+    Save,
+    SaveTest,
+    SaveExit,
+}
+
+struct ActionJob {
+    kind: ActionJobKind,
+    paths: AppPaths,
+    alias: String,
+    host: Host,
+    original: Option<Host>,
+    draft: Draft,
+    language: crate::config::UiLanguage,
+    started: Instant,
+    attempt: u32,
+    retries: u32,
+    retry_at: Option<Instant>,
+    receiver: Option<oneshot::Receiver<Result<ActionJobOutput>>>,
+}
+
+enum ActionJobOutput {
+    Tested((String, bool)),
+    Saved,
+}
+
+fn action_retryable(error: &AppError) -> bool {
+    matches!(
+        error.code,
+        crate::error::ErrorCode::ConnectionFailed | crate::error::ErrorCode::Timeout
+    )
+}
+
 fn host_key_spinner(elapsed: Duration) -> &'static str {
     match (elapsed.as_millis() / 150) % 4 {
         0 => "|",
@@ -745,17 +787,6 @@ fn host_key_spinner(elapsed: Duration) -> &'static str {
         2 => "-",
         _ => "\\",
     }
-}
-
-async fn save_host(
-    wizard: &mut Wizard,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    paths: &AppPaths,
-    alias: &str,
-    host: &Host,
-) -> Result<Option<String>> {
-    persist_host(wizard, paths, alias, host).await?;
-    configure_sudo_if_requested(wizard, terminal, alias, host).await
 }
 
 fn saved_message(wizard: &Wizard, alias: &str) -> String {
@@ -987,25 +1018,337 @@ impl Wizard {
             }
         }
     }
+    fn action_busy_message(&self, job: &ActionJob) -> String {
+        let elapsed = job.started.elapsed().as_secs_f32();
+        let label = match job.kind {
+            ActionJobKind::Test => self.language.text("测试连接", "Test connection"),
+            ActionJobKind::Save => self.language.text("保存主机", "Save host"),
+            ActionJobKind::SaveTest => self.language.text("保存并测试", "Save & test"),
+            ActionJobKind::SaveExit => self.language.text("保存并退出", "Save & exit"),
+        };
+        match self.language {
+            crate::config::UiLanguage::ZhCn => format!(
+                "{} 正在{}... {:.1}s 第 {}/{} 次",
+                host_key_spinner(job.started.elapsed()),
+                label,
+                elapsed,
+                job.attempt,
+                job.retries
+            ),
+            crate::config::UiLanguage::En => format!(
+                "{} {}... {:.1}s attempt {}/{}",
+                host_key_spinner(job.started.elapsed()),
+                label,
+                elapsed,
+                job.attempt,
+                job.retries
+            ),
+        }
+    }
+
+    fn spawn_action_attempt(&mut self) {
+        let Some(job) = self.action_job.as_ref() else {
+            return;
+        };
+        let (sender, receiver) = oneshot::channel();
+        let kind = job.kind;
+        let paths = job.paths.clone();
+        let alias = job.alias.clone();
+        let host = job.host.clone();
+        let original = job.original.clone();
+        let draft = job.draft.clone();
+        let language = job.language;
+        tokio::task::spawn_blocking(move || {
+            let handle = tokio::runtime::Handle::current();
+            let result = match kind {
+                ActionJobKind::Test => handle
+                    .block_on(test_connection(&paths, &alias, &host, language, false))
+                    .map(ActionJobOutput::Tested),
+                ActionJobKind::Save | ActionJobKind::SaveExit | ActionJobKind::SaveTest => handle
+                    .block_on(persist_host_data(
+                        &paths,
+                        &alias,
+                        &host,
+                        original.as_ref(),
+                        &draft,
+                    ))
+                    .map(|()| ActionJobOutput::Saved),
+            };
+            let _ = sender.send(result);
+        });
+        if let Some(job) = self.action_job.as_mut() {
+            job.receiver = Some(receiver);
+            job.retry_at = None;
+        }
+    }
+
+    fn start_action_job(&mut self, kind: ActionJobKind, alias: String, host: Host) {
+        let retries = if matches!(kind, ActionJobKind::Test) {
+            self.retry_attempts.max(1)
+        } else {
+            1
+        };
+        self.action_job = Some(ActionJob {
+            kind,
+            paths: self.self_action_paths(),
+            alias,
+            host,
+            original: self.original.clone(),
+            draft: self.draft.clone(),
+            language: self.language,
+            started: Instant::now(),
+            attempt: 1,
+            retries,
+            retry_at: None,
+            receiver: None,
+        });
+        self.spawn_action_attempt();
+        if let Some(job) = self.action_job.as_ref() {
+            self.message = self.action_busy_message(job);
+        }
+        self.failed = false;
+        self.tested = false;
+    }
+
+    fn self_action_paths(&self) -> AppPaths {
+        self.paths.clone()
+    }
+
+    fn finish_saved(&mut self, kind: ActionJobKind, alias: String, warning: Option<String>) {
+        match kind {
+            ActionJobKind::Save => {
+                let default_message = saved_message(self, &alias);
+                self.message = combine_message(warning, default_message);
+                self.failed = false;
+                self.tested = false;
+            }
+            ActionJobKind::SaveExit => {
+                let default_message = match self.language {
+                    crate::config::UiLanguage::ZhCn => {
+                        format!("主机 '{alias}' 已覆盖保存并退出。")
+                    }
+                    crate::config::UiLanguage::En => {
+                        format!("Host '{alias}' overwritten and exited.")
+                    }
+                };
+                let message = combine_message(warning, default_message);
+                self.result = Some(WizardResult {
+                    saved_alias: Some(alias),
+                    message,
+                });
+            }
+            ActionJobKind::SaveTest => {
+                let default_message = match self.language {
+                    crate::config::UiLanguage::ZhCn => {
+                        format!("主机 '{alias}' 已覆盖保存，正在测试连接...", alias = alias)
+                    }
+                    crate::config::UiLanguage::En => {
+                        format!(
+                            "Host '{alias}' overwritten; testing connection...",
+                            alias = alias
+                        )
+                    }
+                };
+                self.message = combine_message(warning, default_message);
+                self.start_action_job(
+                    ActionJobKind::Test,
+                    alias,
+                    self.draft.host().map(|(_, host)| host).unwrap_or_default(),
+                );
+            }
+            ActionJobKind::Test => {}
+        }
+    }
+
+    fn update_action_job(&mut self) {
+        let Some(job) = self.action_job.as_mut() else {
+            return;
+        };
+        if job.receiver.is_none() {
+            if let Some(retry_at) = job.retry_at
+                && Instant::now() >= retry_at
+            {
+                let attempt = job.attempt;
+                let retries = job.retries;
+                self.spawn_action_attempt();
+                self.message = match self.language {
+                    crate::config::UiLanguage::ZhCn => {
+                        format!("正在重试 第 {attempt}/{retries} 次...")
+                    }
+                    crate::config::UiLanguage::En => {
+                        format!("Retrying attempt {attempt}/{retries}...")
+                    }
+                };
+            }
+            return;
+        }
+        let received = job
+            .receiver
+            .as_mut()
+            .map(|receiver| receiver.try_recv())
+            .unwrap_or(Err(oneshot::error::TryRecvError::Closed));
+        match received {
+            Ok(Ok(output)) => match output {
+                ActionJobOutput::Tested((message, passed)) => {
+                    self.action_job = None;
+                    self.message = message;
+                    self.failed = !passed;
+                    self.tested = passed;
+                }
+                ActionJobOutput::Saved => {
+                    let kind = job.kind;
+                    let alias = job.alias.clone();
+                    let host = job.host.clone();
+                    self.action_job = None;
+                    if self.draft.configure_sudo {
+                        self.pending_sudo = Some((kind, alias, host));
+                        self.message = match self.language {
+                            crate::config::UiLanguage::ZhCn => {
+                                "主机已保存，正在准备 sudo 配置...".to_string()
+                            }
+                            crate::config::UiLanguage::En => {
+                                "Host saved; preparing sudo configuration...".to_string()
+                            }
+                        };
+                        self.failed = false;
+                        self.tested = false;
+                    } else {
+                        self.finish_saved(kind, alias, None);
+                    }
+                }
+            },
+            Ok(Err(error)) => {
+                let attempt = job.attempt;
+                let retries = job.retries;
+                let kind = job.kind;
+                if attempt < retries && action_retryable(&error) {
+                    job.attempt = attempt + 1;
+                    job.receiver = None;
+                    job.retry_at = Some(Instant::now() + Duration::from_millis(250));
+                    let detail = crate::i18n::error_message(&error, self.language);
+                    self.message = match self.language {
+                        crate::config::UiLanguage::ZhCn => {
+                            format!("第 {attempt}/{retries} 次失败：{detail}\n正在重试...")
+                        }
+                        crate::config::UiLanguage::En => {
+                            format!("Attempt {attempt}/{retries} failed: {detail}\nRetrying...")
+                        }
+                    };
+                    self.failed = true;
+                    self.tested = false;
+                } else {
+                    self.action_job = None;
+                    self.message = match self.language {
+                        crate::config::UiLanguage::ZhCn => format!(
+                            "操作失败：{}",
+                            crate::i18n::error_message(&error, self.language)
+                        ),
+                        crate::config::UiLanguage::En => format!(
+                            "Operation failed: {}",
+                            crate::i18n::error_message(&error, self.language)
+                        ),
+                    };
+                    self.failed = true;
+                    self.tested = false;
+                    let _ = kind;
+                }
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {
+                if let Some(job) = self.action_job.as_ref() {
+                    self.message = self.action_busy_message(job);
+                }
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.action_job = None;
+                self.message = self
+                    .language
+                    .text(
+                        "Background worker stopped unexpectedly.",
+                        "后台工作意外停止。",
+                    )
+                    .into();
+                self.failed = true;
+                self.tested = false;
+            }
+        }
+    }
 }
 
-async fn persist_host(
-    wizard: &mut Wizard,
+async fn persist_host_data(
     paths: &AppPaths,
     alias: &str,
     host: &Host,
+    original: Option<&Host>,
+    draft: &Draft,
 ) -> Result<()> {
-    if let Some(original) = wizard.original.as_ref() {
+    if let Some(original) = original {
         crate::host::check_can_edit(paths, alias, original, host)?;
     } else {
         crate::host::check_can_add(paths, alias, host)?;
     }
-    configure_ssh_credentials(wizard, alias, host).await?;
-    if let Some(original) = wizard.original.as_ref() {
+    configure_ssh_credentials_data(paths, alias, host, draft).await?;
+    if let Some(original) = original {
         crate::host::edit_host(paths, alias, original, host.clone())
     } else {
         crate::host::add_host(paths, alias, host.clone())
     }
+}
+
+async fn configure_ssh_credentials_data(
+    paths: &AppPaths,
+    alias: &str,
+    host: &Host,
+    draft: &Draft,
+) -> Result<()> {
+    if draft.reuse_credentials()
+        || (host.auth != AuthMode::VaultPassword && host.auth != AuthMode::VaultKey)
+    {
+        return Ok(());
+    }
+    let client = BrokerClient::new(paths.clone());
+    if !client.ping().await.is_ok() {
+        client.ensure_running().await?;
+    }
+    let stem = host.credential.as_deref().unwrap_or(alias);
+    if host.auth == AuthMode::VaultPassword {
+        let password = draft.ssh_password.as_ref().ok_or_else(|| {
+            AppError::invalid_argument("an SSH password is required for this authentication mode")
+        })?;
+        expect_secret_ack(
+            client
+                .call(RpcRequest::SetCredential {
+                    name: crate::credential::ssh_credential_name(stem),
+                    kind: "ssh-password".into(),
+                    value: password.value().to_string(),
+                })
+                .await?,
+        )?;
+    } else {
+        let name = crate::credential::key_credential_name(stem);
+        let path = std::path::absolute(draft.private_key_path())
+            .map_err(|error| AppError::io("resolve private key import path", error))?;
+        expect_secret_ack(
+            client
+                .call(RpcRequest::ImportPrivateKey { name, path })
+                .await?,
+        )?;
+        if let Some(password) = draft
+            .ssh_password
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
+            expect_secret_ack(
+                client
+                    .call(RpcRequest::SetCredential {
+                        name: crate::credential::ssh_credential_name(stem),
+                        kind: "ssh-password".into(),
+                        value: password.value().to_string(),
+                    })
+                    .await?,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Run the wizard inside an existing TUI. The caller restores its terminal mode afterwards.
@@ -1020,6 +1363,17 @@ pub async fn attach(
     let mut wizard = Wizard::with_original(paths, alias, initial, original, no_color)?;
     loop {
         wizard.update_host_key_job();
+        wizard.update_action_job();
+        if let Some((kind, alias, host)) = wizard.pending_sudo.take() {
+            match configure_sudo_if_requested(&mut wizard, terminal, &alias, &host).await {
+                Ok(warning) => wizard.finish_saved(kind, alias, warning),
+                Err(error) => {
+                    wizard.message = crate::i18n::error_message(&error, wizard.language);
+                    wizard.failed = true;
+                    wizard.tested = false;
+                }
+            }
+        }
         terminal
             .draw(|frame| draw(frame, &wizard))
             .map_err(|error| AppError::io("draw host wizard", error))?;
@@ -1037,7 +1391,7 @@ pub async fn attach(
         let Event::Key(key) = incoming else {
             continue;
         };
-        if wizard.host_key_job.is_some() {
+        if wizard.host_key_job.is_some() || wizard.action_job.is_some() {
             continue;
         }
         if key.kind != KeyEventKind::Press {
@@ -1049,28 +1403,7 @@ pub async fn attach(
                     wizard.exit_prompt = false;
                     match wizard.draft.host() {
                         Ok((alias, host)) => {
-                            match save_host(&mut wizard, terminal, paths, &alias, &host).await {
-                                Err(error) => {
-                                    wizard.message =
-                                        crate::i18n::error_message(&error, wizard.language);
-                                    wizard.failed = true;
-                                }
-                                Ok(warning) => {
-                                    let message =
-                                        warning.unwrap_or_else(|| match wizard.language {
-                                            crate::config::UiLanguage::ZhCn => {
-                                                format!("主机 '{alias}' 已覆盖保存并退出。")
-                                            }
-                                            crate::config::UiLanguage::En => {
-                                                format!("Host '{alias}' overwritten and exited.")
-                                            }
-                                        });
-                                    return Ok(WizardResult {
-                                        saved_alias: Some(alias),
-                                        message,
-                                    });
-                                }
-                            }
+                            wizard.start_action_job(ActionJobKind::SaveExit, alias, host);
                         }
                         Err(error) => {
                             wizard.message = crate::i18n::error_message(&error, wizard.language);
@@ -1169,26 +1502,7 @@ pub async fn attach(
                             wizard.failed = true;
                             continue;
                         }
-                        if let Err(error) =
-                            configure_ssh_credentials(&mut wizard, &alias, &host).await
-                        {
-                            wizard.message = crate::i18n::error_message(&error, wizard.language);
-                            wizard.failed = true;
-                            continue;
-                        }
-                        match test_connection(paths, &alias, &host, wizard.language, true).await {
-                            Ok((message, passed)) => {
-                                wizard.message = message;
-                                wizard.failed = !passed;
-                                wizard.tested = passed;
-                            }
-                            Err(error) => {
-                                wizard.message =
-                                    crate::i18n::error_message(&error, wizard.language);
-                                wizard.failed = true;
-                                wizard.tested = false;
-                            }
-                        }
+                        wizard.start_action_job(ActionJobKind::Test, alias, host);
                     }
                     Err(error) => {
                         wizard.message = crate::i18n::error_message(&error, wizard.language);
@@ -1197,19 +1511,7 @@ pub async fn attach(
                 },
                 Action::Save => match wizard.draft.host() {
                     Ok((alias, host)) => {
-                        match save_host(&mut wizard, terminal, paths, &alias, &host).await {
-                            Err(error) => {
-                                wizard.message =
-                                    crate::i18n::error_message(&error, wizard.language);
-                                wizard.failed = true;
-                            }
-                            Ok(warning) => {
-                                let default_message = saved_message(&wizard, &alias);
-                                wizard.message = warning.unwrap_or(default_message);
-                                wizard.failed = false;
-                                wizard.tested = false;
-                            }
-                        }
+                        wizard.start_action_job(ActionJobKind::Save, alias, host);
                     }
                     Err(error) => {
                         wizard.message = crate::i18n::error_message(&error, wizard.language);
@@ -1218,41 +1520,7 @@ pub async fn attach(
                 },
                 Action::SaveTest => match wizard.draft.host() {
                     Ok((alias, host)) => {
-                        match save_host(&mut wizard, terminal, paths, &alias, &host).await {
-                            Err(error) => {
-                                wizard.message =
-                                    crate::i18n::error_message(&error, wizard.language);
-                                wizard.failed = true;
-                            }
-                            Ok(warning) => {
-                                let saved = match wizard.language {
-                                    crate::config::UiLanguage::ZhCn => {
-                                        format!("主机 '{alias}' 已保存。")
-                                    }
-                                    crate::config::UiLanguage::En => {
-                                        format!("Host '{alias}' saved.")
-                                    }
-                                };
-                                match test_connection(paths, &alias, &host, wizard.language, false)
-                                    .await
-                                {
-                                    Ok((message, passed)) => {
-                                        wizard.message =
-                                            combine_message(warning, format!("{saved} {message}"));
-                                        wizard.failed = !passed;
-                                        wizard.tested = passed;
-                                    }
-                                    Err(error) => {
-                                        let message =
-                                            crate::i18n::error_message(&error, wizard.language);
-                                        wizard.message =
-                                            combine_message(warning, format!("{saved} {message}"));
-                                        wizard.failed = true;
-                                        wizard.tested = false;
-                                    }
-                                }
-                            }
-                        }
+                        wizard.start_action_job(ActionJobKind::SaveTest, alias, host);
                     }
                     Err(error) => {
                         wizard.message = crate::i18n::error_message(&error, wizard.language);
@@ -1261,27 +1529,7 @@ pub async fn attach(
                 },
                 Action::SaveExit => match wizard.draft.host() {
                     Ok((alias, host)) => {
-                        match save_host(&mut wizard, terminal, paths, &alias, &host).await {
-                            Err(error) => {
-                                wizard.message =
-                                    crate::i18n::error_message(&error, wizard.language);
-                                wizard.failed = true;
-                            }
-                            Ok(warning) => {
-                                let message = warning.unwrap_or_else(|| match wizard.language {
-                                    crate::config::UiLanguage::ZhCn => {
-                                        format!("主机 '{alias}' 已覆盖保存并退出。")
-                                    }
-                                    crate::config::UiLanguage::En => {
-                                        format!("Host '{alias}' overwritten and exited.")
-                                    }
-                                });
-                                wizard.result = Some(WizardResult {
-                                    saved_alias: Some(alias),
-                                    message,
-                                });
-                            }
-                        }
+                        wizard.start_action_job(ActionJobKind::SaveExit, alias, host);
                     }
                     Err(error) => {
                         wizard.message = crate::i18n::error_message(&error, wizard.language);
@@ -1480,61 +1728,6 @@ async fn test_connection(
         let _ = log.append(&event);
     }
     Ok((message, status == "success"))
-}
-
-async fn configure_ssh_credentials(wizard: &mut Wizard, alias: &str, host: &Host) -> Result<()> {
-    if wizard.draft.reuse_credentials()
-        || (host.auth != AuthMode::VaultPassword && host.auth != AuthMode::VaultKey)
-    {
-        return Ok(());
-    }
-    if !wizard.client.ping().await.is_ok() {
-        wizard.client.ensure_running().await?;
-    }
-    let stem = host.credential.as_deref().unwrap_or(alias);
-    if host.auth == AuthMode::VaultPassword {
-        let password = wizard.draft.ssh_password.as_ref().ok_or_else(|| {
-            AppError::invalid_argument("an SSH password is required for this authentication mode")
-        })?;
-        expect_secret_ack(
-            wizard
-                .client
-                .call(RpcRequest::SetCredential {
-                    name: crate::credential::ssh_credential_name(stem),
-                    kind: "ssh-password".into(),
-                    value: password.value().to_string(),
-                })
-                .await?,
-        )?;
-    } else {
-        let name = crate::credential::key_credential_name(stem);
-        let path = std::path::absolute(wizard.draft.private_key_path())
-            .map_err(|error| AppError::io("resolve private key import path", error))?;
-        expect_secret_ack(
-            wizard
-                .client
-                .call(RpcRequest::ImportPrivateKey { name, path })
-                .await?,
-        )?;
-        if let Some(password) = wizard
-            .draft
-            .ssh_password
-            .as_ref()
-            .filter(|value| !value.is_empty())
-        {
-            expect_secret_ack(
-                wizard
-                    .client
-                    .call(RpcRequest::SetCredential {
-                        name: crate::credential::ssh_credential_name(stem),
-                        kind: "ssh-password".into(),
-                        value: password.value().to_string(),
-                    })
-                    .await?,
-            )?;
-        }
-    }
-    Ok(())
 }
 
 fn expect_secret_ack(payload: RpcPayload) -> Result<()> {
@@ -2098,9 +2291,15 @@ mod tests {
             .draft
             .host()
             .unwrap_or_else(|error| panic!("draft host: {error}"));
-        persist_host(&mut wizard, &paths, &alias, &host)
-            .await
-            .unwrap_or_else(|error| panic!("persist: {error}"));
+        persist_host_data(
+            &paths,
+            &alias,
+            &host,
+            wizard.original.as_ref(),
+            &wizard.draft,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("persist: {error}"));
         let after = Config::load(&paths.config).unwrap_or_else(|error| panic!("load: {error}"));
         assert_eq!(after.hosts.get("oracle"), Some(&host));
         assert_eq!(host.username.as_deref(), Some("opc"));
