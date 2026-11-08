@@ -1063,9 +1063,23 @@ impl Wizard {
         tokio::task::spawn_blocking(move || {
             let handle = tokio::runtime::Handle::current();
             let result = match kind {
-                ActionJobKind::Test => handle
-                    .block_on(test_connection(&paths, &alias, &host, language, pending))
-                    .map(ActionJobOutput::Tested),
+                ActionJobKind::Test => {
+                    if pending {
+                        if let Err(error) = handle.block_on(configure_ssh_credentials_data(
+                            &paths, &alias, &host, &draft,
+                        )) {
+                            Err(error)
+                        } else {
+                            handle
+                                .block_on(test_connection(&paths, &alias, &host, language, pending))
+                                .map(ActionJobOutput::Tested)
+                        }
+                    } else {
+                        handle
+                            .block_on(test_connection(&paths, &alias, &host, language, pending))
+                            .map(ActionJobOutput::Tested)
+                    }
+                }
                 ActionJobKind::Save | ActionJobKind::SaveExit | ActionJobKind::SaveTest => handle
                     .block_on(persist_host_data(
                         &paths,
@@ -1376,6 +1390,9 @@ pub async fn attach(
                     wizard.tested = false;
                 }
             }
+        }
+        if let Some(result) = wizard.result.take() {
+            return Ok(result);
         }
         terminal
             .draw(|frame| draw(frame, &wizard))
