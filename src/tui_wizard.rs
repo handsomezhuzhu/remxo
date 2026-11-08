@@ -4,10 +4,14 @@ use crate::config::{
     AppPaths, ApprovalMode, AuthMode, Host, Platform, RawMode, ShellKind, TransportKind,
 };
 use crate::error::{AppError, Result};
+use crate::text_input::{TextInput, display_width};
 use crate::transport::openssh::OpensshTransport;
 use crate::transport::{ExecutionRequest, Transport as _, check_agent_available};
 use chrono::Utc;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -20,7 +24,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use std::io::{Stdout, stdout};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionMode {
@@ -56,26 +59,42 @@ impl ConnectionMode {
 }
 
 struct Draft {
-    alias: String,
+    alias: TextInput,
     mode: ConnectionMode,
-    address: String,
-    username: String,
-    port: String,
-    number: String,
+    address: TextInput,
+    username: TextInput,
+    port: TextInput,
+    number: TextInput,
     auth: AuthMode,
-    ssh_password: Option<Zeroizing<String>>,
-    private_key_path: String,
-    environment: String,
+    ssh_password: Option<TextInput>,
+    private_key_path: TextInput,
+    environment: TextInput,
     tags: Vec<String>,
     platform: Platform,
     raw_mode: RawMode,
     approval: ApprovalMode,
     configure_sudo: bool,
     insecure_acknowledged: bool,
+    editing: bool,
+    original_auth: Option<AuthMode>,
+    original_credential: Option<String>,
+    original_sudo_credential: Option<String>,
+    replace_credentials: bool,
+    rotation_id: uuid::Uuid,
 }
 
 impl Draft {
-    fn new(alias: Option<String>, initial: Option<Host>, config: &crate::config::Config) -> Self {
+    fn new(
+        alias: Option<String>,
+        initial: Option<Host>,
+        config: &crate::config::Config,
+        editing: bool,
+    ) -> Result<Self> {
+        fn input(value: String, max_chars: usize) -> Result<TextInput> {
+            TextInput::with_value(&value, max_chars).map_err(|error| {
+                AppError::invalid_argument(format!("invalid initial host form value: {error}"))
+            })
+        }
         let next_number = config
             .hosts
             .values()
@@ -86,51 +105,82 @@ impl Draft {
             .max(1);
         let initial = initial.unwrap_or_default();
         let tags = initial.tags.clone();
+        let original_auth = editing.then_some(initial.auth);
+        let original_credential = editing.then(|| initial.credential.clone()).flatten();
+        let original_sudo_credential = editing.then(|| initial.sudo_credential.clone()).flatten();
         let mode = match initial.transport {
             TransportKind::Ssh if initial.ssh_alias.is_some() => ConnectionMode::OpenSshAlias,
             TransportKind::Ssh => ConnectionMode::DirectSsh,
             TransportKind::Telnet => ConnectionMode::Telnet,
         };
-        Self {
-            alias: alias.unwrap_or_else(|| "prod-01".into()),
+        Ok(Self {
+            alias: input(alias.unwrap_or_else(|| "prod-01".into()), 256)?,
             mode,
-            address: initial.ssh_alias.or(initial.hostname).unwrap_or_default(),
-            username: initial.username.unwrap_or_default(),
-            port: initial.port.to_string(),
-            number: initial.number.unwrap_or(next_number).to_string(),
+            address: input(
+                initial.ssh_alias.or(initial.hostname).unwrap_or_default(),
+                256,
+            )?,
+            username: input(initial.username.unwrap_or_default(), 256)?,
+            port: input(initial.port.to_string(), 5)?,
+            number: input(initial.number.unwrap_or(next_number).to_string(), 10)?,
             auth: initial.auth,
             ssh_password: None,
-            private_key_path: String::new(),
-            environment: if initial.environment.is_empty() {
-                "development".into()
-            } else {
-                initial.environment
-            },
+            private_key_path: TextInput::new(512),
+            environment: input(
+                if initial.environment.is_empty() {
+                    "development".into()
+                } else {
+                    initial.environment
+                },
+                256,
+            )?,
             tags,
             platform: initial.platform,
             raw_mode: initial.raw_mode,
             approval: initial.approval,
-            configure_sudo: initial.sudo_credential.is_some(),
+            configure_sudo: !editing && initial.sudo_credential.is_some(),
             insecure_acknowledged: initial.insecure_acknowledged,
+            editing,
+            original_auth,
+            original_credential,
+            original_sudo_credential,
+            replace_credentials: false,
+            rotation_id: uuid::Uuid::new_v4(),
+        })
+    }
+
+    fn reuse_credentials(&self) -> bool {
+        self.editing && self.original_auth == Some(self.auth) && !self.replace_credentials
+    }
+
+    fn private_key_path(&self) -> String {
+        let value = self.private_key_path.value().trim();
+        if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            return value[1..value.len() - 1].to_string();
         }
+        value.to_string()
     }
 
     fn host(&self) -> Result<(String, Host)> {
-        let alias = self.alias.trim();
+        let alias = self.alias.value().trim();
         if alias.is_empty() {
             return Err(AppError::invalid_argument("alias is required"));
         }
-        if self.address.trim().is_empty() {
+        if self.address.value().trim().is_empty() {
             return Err(AppError::invalid_argument(
                 "an OpenSSH alias or hostname is required before testing or saving",
             ));
         }
         match self.auth {
             AuthMode::VaultPassword => {
-                if self
-                    .ssh_password
-                    .as_ref()
-                    .is_none_or(|value| value.is_empty())
+                if !self.reuse_credentials()
+                    && self
+                        .ssh_password
+                        .as_ref()
+                        .is_none_or(|value| value.is_empty())
                 {
                     return Err(AppError::invalid_argument(
                         "selecting Vault SSH password requires a non-empty password entered through the hidden field",
@@ -138,14 +188,14 @@ impl Draft {
                 }
             }
             AuthMode::VaultKey => {
-                if self.private_key_path.trim().is_empty() {
+                if !self.reuse_credentials() && self.private_key_path.value().trim().is_empty() {
                     return Err(AppError::invalid_argument(
                         "selecting Vault private key requires a private key file path (not the .pub file)",
                     ));
                 }
             }
             AuthMode::OpensshConfig | AuthMode::ExternalAgent => {
-                if self.ssh_password.is_some() || !self.private_key_path.trim().is_empty() {
+                if self.ssh_password.is_some() || !self.private_key_path.value().trim().is_empty() {
                     return Err(AppError::invalid_argument(
                         "choose Vault SSH password or Vault private key before importing credentials; no secret was saved",
                     ));
@@ -153,27 +203,31 @@ impl Draft {
             }
         }
         if self.mode == ConnectionMode::Telnet
-            && (self.ssh_password.is_some() || !self.private_key_path.trim().is_empty())
+            && (self.ssh_password.is_some() || !self.private_key_path.value().trim().is_empty())
         {
             return Err(AppError::invalid_argument(
                 "SSH password/private-key import is available only for SSH hosts, not Telnet",
             ));
         }
-        let port = self
-            .port
-            .parse::<u16>()
-            .map_err(|_| AppError::invalid_argument("port must be an integer from 1 to 65535"))?;
-        let number = self
-            .number
-            .parse::<u32>()
-            .map_err(|_| AppError::invalid_argument("host number must be a positive integer"))?;
+        let port =
+            self.port.value().parse::<u16>().map_err(|_| {
+                AppError::invalid_argument("port must be an integer from 1 to 65535")
+            })?;
+        let number =
+            self.number.value().parse::<u32>().map_err(|_| {
+                AppError::invalid_argument("host number must be a positive integer")
+            })?;
         let (ssh_alias, hostname, shell) = match self.mode {
-            ConnectionMode::OpenSshAlias => {
-                (Some(self.address.trim().to_string()), None, self.shell())
-            }
-            ConnectionMode::DirectSsh | ConnectionMode::Telnet => {
-                (None, Some(self.address.trim().to_string()), self.shell())
-            }
+            ConnectionMode::OpenSshAlias => (
+                Some(self.address.value().trim().to_string()),
+                None,
+                self.shell(),
+            ),
+            ConnectionMode::DirectSsh | ConnectionMode::Telnet => (
+                None,
+                Some(self.address.value().trim().to_string()),
+                self.shell(),
+            ),
         };
         let host = Host {
             number: Some(number),
@@ -181,20 +235,34 @@ impl Draft {
             ssh_alias,
             hostname,
             port,
-            username: (!self.username.trim().is_empty()).then(|| self.username.trim().to_string()),
+            username: (!self.username.value().trim().is_empty())
+                .then(|| self.username.value().trim().to_string()),
             platform: self.platform,
             shell,
             auth: self.auth,
-            environment: self.environment.trim().to_string(),
+            environment: self.environment.value().trim().to_string(),
             tags: self.tags.clone(),
             raw_mode: self.raw_mode,
             approval: self.approval,
             insecure_acknowledged: self.insecure_acknowledged,
-            sudo_credential: self
-                .configure_sudo
-                .then(|| crate::credential::sudo_credential_name(alias)),
-            credential: matches!(self.auth, AuthMode::VaultPassword | AuthMode::VaultKey)
-                .then(|| alias.to_string()),
+            sudo_credential: if self.configure_sudo {
+                Some(crate::credential::sudo_credential_name(alias))
+            } else {
+                self.original_sudo_credential.clone()
+            },
+            credential: match self.auth {
+                AuthMode::VaultPassword | AuthMode::VaultKey if !self.editing => {
+                    Some(alias.to_string())
+                }
+                AuthMode::VaultPassword | AuthMode::VaultKey if self.reuse_credentials() => self
+                    .original_credential
+                    .clone()
+                    .or_else(|| Some(alias.to_string())),
+                AuthMode::VaultPassword | AuthMode::VaultKey => {
+                    Some(format!("{alias}:rotation:{}", self.rotation_id.simple()))
+                }
+                AuthMode::OpensshConfig | AuthMode::ExternalAgent => None,
+            },
             prompt: None,
         };
         host.validate(alias)?;
@@ -216,11 +284,11 @@ impl Draft {
 
     fn value(&self, index: usize, language: crate::config::UiLanguage) -> String {
         match index {
-            0 => self.alias.clone(),
+            0 => self.alias.value().to_string(),
             1 => self.mode.label(language).into(),
-            2 => self.address.clone(),
-            3 => self.username.clone(),
-            4 => self.port.clone(),
+            2 => self.address.value().to_string(),
+            3 => self.username.value().to_string(),
+            4 => self.port.value().to_string(),
             5 => match self.auth {
                 AuthMode::OpensshConfig => language
                     .text(
@@ -238,8 +306,8 @@ impl Draft {
                     .text("Vault-managed private key", "Vault 管理的私钥")
                     .into(),
             },
-            6 => self.number.clone(),
-            7 => self.environment.clone(),
+            6 => self.number.value().to_string(),
+            7 => self.environment.value().to_string(),
             8 => format!("{:?}", self.platform).to_ascii_lowercase(),
             9 => match self.raw_mode {
                 RawMode::Allow => language.text("allow raw commands", "允许原始命令").into(),
@@ -255,13 +323,34 @@ impl Draft {
             },
             11 => yes_no(self.configure_sudo, language),
             12 => yes_no(self.insecure_acknowledged, language),
-            13 => self
-                .ssh_password
-                .as_ref()
-                .filter(|password| !password.is_empty())
-                .map(|_| language.text("entered (hidden)", "已输入（隐藏）").into())
-                .unwrap_or_else(|| language.text("not set", "未输入").into()),
-            14 => self.private_key_path.clone(),
+            13 => {
+                if self.reuse_credentials() {
+                    language
+                        .text(
+                            "keep current (type to replace)",
+                            "保留当前凭据（输入即更换）",
+                        )
+                        .into()
+                } else {
+                    self.ssh_password
+                        .as_ref()
+                        .filter(|password| !password.is_empty())
+                        .map(|password| password.masked_value('*'))
+                        .unwrap_or_else(|| language.text("not set", "未输入").into())
+                }
+            }
+            14 => {
+                if self.reuse_credentials() && self.auth == AuthMode::VaultKey {
+                    language
+                        .text(
+                            "keep current key (enter a path to replace)",
+                            "保留当前私钥（输入路径即更换）",
+                        )
+                        .into()
+                } else {
+                    self.private_key_path.value().to_string()
+                }
+            }
             _ => String::new(),
         }
     }
@@ -307,81 +396,129 @@ impl Draft {
         }
     }
 
+    fn input(&self, index: usize) -> Option<&TextInput> {
+        if self.editing && index == 0 {
+            return None;
+        }
+        match index {
+            0 => Some(&self.alias),
+            2 => Some(&self.address),
+            3 => Some(&self.username),
+            4 => Some(&self.port),
+            6 => Some(&self.number),
+            7 => Some(&self.environment),
+            13 => self.ssh_password.as_ref(),
+            14 => Some(&self.private_key_path),
+            _ => None,
+        }
+    }
+
+    fn input_mut(&mut self, index: usize) -> Option<&mut TextInput> {
+        if self.editing && index == 0 {
+            return None;
+        }
+        match index {
+            0 => Some(&mut self.alias),
+            2 => Some(&mut self.address),
+            3 => Some(&mut self.username),
+            4 => Some(&mut self.port),
+            6 => Some(&mut self.number),
+            7 => Some(&mut self.environment),
+            13 => self.ssh_password.as_mut(),
+            14 => Some(&mut self.private_key_path),
+            _ => None,
+        }
+    }
+
     fn type_character(&mut self, index: usize, character: char) {
-        if index == 13 {
-            if self.ssh_password.is_none() {
-                self.ssh_password = Some(Zeroizing::new(String::new()));
-            }
-            if let Some(password) = self.ssh_password.as_mut()
-                && password.len() + character.len_utf8() <= 4096
-            {
-                password.push(character);
-            }
+        if matches!(index, 4 | 6) && !character.is_ascii_digit() {
             return;
         }
-        if index == 14 {
-            if self.private_key_path.chars().count() < 512 {
-                self.private_key_path.push(character);
-            }
-            return;
+        if index == 13 && self.ssh_password.is_none() {
+            self.ssh_password = Some(TextInput::new(4096));
         }
-        let target = match index {
-            0 => &mut self.alias,
-            2 => &mut self.address,
-            3 => &mut self.username,
-            4 if character.is_ascii_digit() => &mut self.port,
-            6 if character.is_ascii_digit() => &mut self.number,
-            7 => &mut self.environment,
-            4 | 6 => return,
-            _ => return,
+        let changed = if let Some(input) = self.input_mut(index) {
+            input.insert_char(character).is_ok()
+        } else {
+            false
         };
-        if target.chars().count() < 256 {
-            target.push(character);
+        if changed && self.editing && matches!(index, 13 | 14) {
+            self.replace_credentials = true;
+        }
+    }
+
+    fn paste(&mut self, index: usize, text: &str) {
+        if matches!(index, 4 | 6) && !text.chars().all(|character| character.is_ascii_digit()) {
+            return;
+        }
+        if index == 13 && self.ssh_password.is_none() {
+            self.ssh_password = Some(TextInput::new(4096));
+        }
+        let changed = if let Some(input) = self.input_mut(index) {
+            input.paste(text).is_ok()
+        } else {
+            false
+        };
+        if changed && self.editing && matches!(index, 13 | 14) {
+            self.replace_credentials = true;
+        }
+    }
+
+    fn move_left(&mut self, index: usize) {
+        if let Some(input) = self.input_mut(index) {
+            input.move_left();
+        }
+    }
+
+    fn move_right(&mut self, index: usize) {
+        if let Some(input) = self.input_mut(index) {
+            input.move_right();
+        }
+    }
+
+    fn move_home(&mut self, index: usize) {
+        if let Some(input) = self.input_mut(index) {
+            input.move_home();
+        }
+    }
+
+    fn move_end(&mut self, index: usize) {
+        if let Some(input) = self.input_mut(index) {
+            input.move_end();
         }
     }
 
     fn backspace(&mut self, index: usize) {
-        if index == 13 {
-            if let Some(password) = self.ssh_password.as_mut() {
-                password.pop();
-            }
-            return;
+        if let Some(input) = self.input_mut(index) {
+            input.backspace();
         }
-        if index == 14 {
-            self.private_key_path.pop();
-            return;
+    }
+
+    fn delete(&mut self, index: usize) {
+        if let Some(input) = self.input_mut(index) {
+            input.delete();
         }
-        let target = match index {
-            0 => &mut self.alias,
-            2 => &mut self.address,
-            3 => &mut self.username,
-            4 => &mut self.port,
-            6 => &mut self.number,
-            7 => &mut self.environment,
-            _ => return,
-        };
-        target.pop();
+    }
+
+    fn delete_word_before(&mut self, index: usize) {
+        if let Some(input) = self.input_mut(index) {
+            input.delete_word_before();
+        }
+    }
+
+    fn delete_to_start(&mut self, index: usize) {
+        if let Some(input) = self.input_mut(index) {
+            input.delete_to_start();
+        }
     }
 
     fn clear(&mut self, index: usize) {
-        if index == 13 {
-            self.ssh_password = None;
-            return;
+        if self.editing && matches!(index, 13 | 14) {
+            self.replace_credentials = true;
         }
-        if index == 14 {
-            self.private_key_path.clear();
-            return;
+        if let Some(input) = self.input_mut(index) {
+            input.clear();
         }
-        let target = match index {
-            0 => &mut self.alias,
-            2 => &mut self.address,
-            3 => &mut self.username,
-            4 => &mut self.port,
-            6 => &mut self.number,
-            7 => &mut self.environment,
-            _ => return,
-        };
-        target.clear();
     }
 }
 
@@ -410,37 +547,74 @@ struct Wizard {
     language: crate::config::UiLanguage,
     result: Option<WizardResult>,
     client: BrokerClient,
+    original: Option<Host>,
 }
 
 impl Wizard {
+    #[cfg(test)]
     fn new(
         paths: &AppPaths,
         alias: Option<String>,
         initial: Option<Host>,
         no_color: bool,
     ) -> Result<Self> {
+        Self::with_original(paths, alias, initial, None, no_color)
+    }
+
+    fn with_original(
+        paths: &AppPaths,
+        alias: Option<String>,
+        initial: Option<Host>,
+        original: Option<Host>,
+        no_color: bool,
+    ) -> Result<Self> {
         let config = crate::config::Config::load(&paths.config)?;
         let language = config.settings.language;
+        let editing = original.is_some();
+        let draft = Draft::new(alias, initial, &config, editing)?;
         Ok(Self {
             client: BrokerClient::new(paths.clone()),
-            draft: Draft::new(alias, initial, &config),
+            draft,
             focused: 0,
-            message: language
-                .text(
+            message: if editing {
+                language.text(
+                    "Edit connection fields; unchanged credentials are preserved. Enter moves to save or save-and-test.",
+                    "编辑连接字段；未更换的凭据会保留。Enter 前往保存或保存并测试。",
+                )
+            } else {
+                language.text(
                     "Complete fields. Enter moves through Connection → Policy → Review; Esc discards changes.",
                     "请填写字段。Enter 依次进入连接、策略和复核；Esc 放弃更改。",
                 )
-                .into(),
+            }
+            .into(),
             failed: false,
             tested: false,
             no_color,
             language,
             result: None,
+            original,
         })
     }
 
-    fn handle_key(&mut self, key: KeyCode) {
-        match key {
+    #[cfg(test)]
+    fn handle_key(&mut self, code: KeyCode) {
+        self.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('u') => self.draft.delete_to_start(self.focused),
+                KeyCode::Char('w') => self.draft.delete_word_before(self.focused),
+                KeyCode::Char('l') => self.draft.clear(self.focused),
+                KeyCode::Left | KeyCode::Home => self.draft.move_home(self.focused),
+                KeyCode::Right | KeyCode::End => self.draft.move_end(self.focused),
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
             KeyCode::Esc => {
                 self.result = Some(WizardResult {
                     saved_alias: None,
@@ -455,13 +629,21 @@ impl Wizard {
             }
             KeyCode::Up => self.focused = self.focused.saturating_sub(1),
             KeyCode::Down => self.focused = (self.focused + 1).min(16),
+            KeyCode::Left if self.draft.input(self.focused).is_some() => {
+                self.draft.move_left(self.focused)
+            }
+            KeyCode::Right if self.draft.input(self.focused).is_some() => {
+                self.draft.move_right(self.focused)
+            }
             KeyCode::Left => self.draft.change(self.focused, -1),
             KeyCode::Right => self.draft.change(self.focused, 1),
+            KeyCode::Home | KeyCode::PageUp => self.draft.move_home(self.focused),
+            KeyCode::End | KeyCode::PageDown => self.draft.move_end(self.focused),
             KeyCode::Char(' ') if matches!(self.focused, 1 | 5 | 8 | 9 | 10 | 11 | 12) => {
                 self.draft.change(self.focused, 1)
             }
             KeyCode::Backspace => self.draft.backspace(self.focused),
-            KeyCode::Delete => self.draft.clear(self.focused),
+            KeyCode::Delete => self.draft.delete(self.focused),
             KeyCode::Char(character) => self.draft.type_character(self.focused, character),
             KeyCode::Tab => self.focused = (self.focused + 1).min(16),
             KeyCode::BackTab => self.focused = self.focused.saturating_sub(1),
@@ -491,6 +673,25 @@ enum Action {
     Save,
 }
 
+async fn persist_host(
+    wizard: &mut Wizard,
+    paths: &AppPaths,
+    alias: &str,
+    host: &Host,
+) -> Result<()> {
+    if let Some(original) = wizard.original.as_ref() {
+        crate::host::check_can_edit(paths, alias, original, host)?;
+    } else {
+        crate::host::check_can_add(paths, alias, host)?;
+    }
+    configure_ssh_credentials(wizard, alias, host).await?;
+    if let Some(original) = wizard.original.as_ref() {
+        crate::host::edit_host(paths, alias, original, host.clone())
+    } else {
+        crate::host::add_host(paths, alias, host.clone())
+    }
+}
+
 /// Run the wizard inside an existing TUI. The caller restores its terminal mode afterwards.
 pub async fn attach(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -498,8 +699,9 @@ pub async fn attach(
     alias: Option<String>,
     initial: Option<Host>,
     no_color: bool,
+    original: Option<Host>,
 ) -> Result<WizardResult> {
-    let mut wizard = Wizard::new(paths, alias, initial, no_color)?;
+    let mut wizard = Wizard::with_original(paths, alias, initial, original, no_color)?;
     loop {
         terminal
             .draw(|frame| draw(frame, &wizard))
@@ -509,9 +711,13 @@ pub async fn attach(
         {
             continue;
         }
-        let Event::Key(key) =
-            event::read().map_err(|error| AppError::io("read host wizard input", error))?
-        else {
+        let incoming =
+            event::read().map_err(|error| AppError::io("read host wizard input", error))?;
+        if let Event::Paste(text) = incoming {
+            wizard.draft.paste(wizard.focused, &text);
+            continue;
+        }
+        let Event::Key(key) = incoming else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -519,54 +725,153 @@ pub async fn attach(
         }
         match key.code {
             KeyCode::Enter if wizard.focused >= 15 => match wizard.action() {
+                Action::Test if wizard.original.is_some() => match wizard.draft.host() {
+                    Ok((alias, host)) => {
+                        match persist_host(&mut wizard, paths, &alias, &host).await {
+                            Err(error) => {
+                                wizard.message =
+                                    crate::i18n::error_message(&error, wizard.language);
+                                wizard.failed = true;
+                            }
+                            Ok(()) => {
+                                let sudo_warning = match configure_sudo_if_requested(
+                                    &mut wizard,
+                                    terminal,
+                                    &alias,
+                                    &host,
+                                )
+                                .await
+                                {
+                                    Ok(message) => message,
+                                    Err(error) => Some(match wizard.language {
+                                        crate::config::UiLanguage::ZhCn => {
+                                            format!(
+                                                "sudo 配置失败：{}",
+                                                crate::i18n::error_message(&error, wizard.language)
+                                            )
+                                        }
+                                        crate::config::UiLanguage::En => {
+                                            format!(
+                                                "sudo setup failed: {}",
+                                                crate::i18n::error_message(&error, wizard.language)
+                                            )
+                                        }
+                                    }),
+                                };
+                                match test_connection(paths, &alias, &host, wizard.language, false)
+                                    .await
+                                {
+                                    Ok((message, passed)) => {
+                                        wizard.result = Some(WizardResult {
+                                            saved_alias: Some(alias.clone()),
+                                            message: match (passed, sudo_warning, wizard.language) {
+                                                (true, None, crate::config::UiLanguage::ZhCn) => {
+                                                    format!("主机 '{alias}' 已保存，连接测试通过。")
+                                                }
+                                                (true, None, crate::config::UiLanguage::En) => {
+                                                    format!(
+                                                        "Host '{alias}' saved and its connection test passed."
+                                                    )
+                                                }
+                                                (passed, warning, language) => {
+                                                    let test_message = match (language, passed) {
+                                                        (crate::config::UiLanguage::ZhCn, true) => {
+                                                            format!(
+                                                                "主机 '{alias}' 已保存，连接测试通过。"
+                                                            )
+                                                        }
+                                                        (crate::config::UiLanguage::En, true) => {
+                                                            format!(
+                                                                "Host '{alias}' saved and its connection test passed."
+                                                            )
+                                                        }
+                                                        (
+                                                            crate::config::UiLanguage::ZhCn,
+                                                            false,
+                                                        ) => format!(
+                                                            "主机 '{alias}' 已保存，但连接测试未通过：{message}"
+                                                        ),
+                                                        (crate::config::UiLanguage::En, false) => {
+                                                            format!(
+                                                                "Host '{alias}' was saved, but its connection test failed: {message}"
+                                                            )
+                                                        }
+                                                    };
+                                                    match warning {
+                                                        Some(warning) => {
+                                                            format!("{test_message} {warning}")
+                                                        }
+                                                        None => test_message,
+                                                    }
+                                                }
+                                            },
+                                        });
+                                        wizard.failed = !passed;
+                                    }
+                                    Err(error) => {
+                                        let message =
+                                            crate::i18n::error_message(&error, wizard.language);
+                                        wizard.result = Some(WizardResult {
+                                            saved_alias: Some(alias.clone()),
+                                            message: match wizard.language {
+                                                crate::config::UiLanguage::ZhCn => format!(
+                                                    "主机 '{alias}' 已保存，但连接测试失败：{message}"
+                                                ),
+                                                crate::config::UiLanguage::En => format!(
+                                                    "Host '{alias}' was saved, but its connection test failed: {message}"
+                                                ),
+                                            },
+                                        });
+                                        wizard.failed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        wizard.message = crate::i18n::error_message(&error, wizard.language);
+                        wizard.failed = true;
+                    }
+                },
                 Action::Test => match wizard.draft.host() {
                     Ok((alias, host)) => {
                         let precondition = crate::host::check_can_add(paths, &alias, &host);
                         if let Err(error) = precondition {
-                            wizard.message = crate::redact::sanitize(&error.message);
+                            wizard.message = crate::i18n::error_message(&error, wizard.language);
                             wizard.failed = true;
                             continue;
                         }
                         if let Err(error) =
                             configure_ssh_credentials(&mut wizard, &alias, &host).await
                         {
-                            wizard.message = crate::redact::sanitize(&error.message);
+                            wizard.message = crate::i18n::error_message(&error, wizard.language);
                             wizard.failed = true;
                             continue;
                         }
-                        match test_connection(paths, &alias, &host, wizard.language).await {
+                        match test_connection(paths, &alias, &host, wizard.language, true).await {
                             Ok((message, passed)) => {
                                 wizard.message = message;
                                 wizard.failed = !passed;
                                 wizard.tested = passed;
                             }
                             Err(error) => {
-                                wizard.message = crate::redact::sanitize(&error.message);
+                                wizard.message =
+                                    crate::i18n::error_message(&error, wizard.language);
                                 wizard.failed = true;
                                 wizard.tested = false;
                             }
                         }
                     }
                     Err(error) => {
-                        wizard.message = crate::redact::sanitize(&error.message);
+                        wizard.message = crate::i18n::error_message(&error, wizard.language);
                         wizard.failed = true;
                     }
                 },
                 Action::Save => match wizard.draft.host() {
                     Ok((alias, host)) => {
-                        let warning = match crate::host::check_can_add(paths, &alias, &host) {
-                            Err(error) => Some(error),
-                            Ok(()) => configure_ssh_credentials(&mut wizard, &alias, &host)
-                                .await
-                                .err(),
-                        };
+                        let warning = persist_host(&mut wizard, paths, &alias, &host).await.err();
                         if let Some(error) = warning {
-                            wizard.message = crate::redact::sanitize(&error.message);
-                            wizard.failed = true;
-                        } else if let Err(error) =
-                            crate::host::add_host(paths, &alias, host.clone())
-                        {
-                            wizard.message = crate::redact::sanitize(&error.message);
+                            wizard.message = crate::i18n::error_message(&error, wizard.language);
                             wizard.failed = true;
                         } else {
                             let warning = match configure_sudo_if_requested(
@@ -581,11 +886,11 @@ pub async fn attach(
                                 Err(error) => Some(match wizard.language {
                                     crate::config::UiLanguage::ZhCn => format!(
                                         "主机 '{alias}' 已保存，但 sudo 配置失败：{}。请继续运行 'remxo vault set-sudo {alias}'。",
-                                        crate::redact::sanitize(&error.message)
+                                        crate::i18n::error_message(&error, wizard.language)
                                     ),
                                     crate::config::UiLanguage::En => format!(
                                         "Host '{alias}' was saved, but sudo configuration failed: {}. Continue with 'remxo vault set-sudo {alias}'.",
-                                        crate::redact::sanitize(&error.message)
+                                        crate::i18n::error_message(&error, wizard.language)
                                     ),
                                 }),
                             };
@@ -606,7 +911,7 @@ pub async fn attach(
                         }
                     }
                     Err(error) => {
-                        wizard.message = crate::redact::sanitize(&error.message);
+                        wizard.message = crate::i18n::error_message(&error, wizard.language);
                         wizard.failed = true;
                     }
                 },
@@ -617,7 +922,7 @@ pub async fn attach(
                     wizard.focused += 1;
                 }
             }
-            other => wizard.handle_key(other),
+            other => wizard.handle_key_event(KeyEvent::new(other, key.modifiers)),
         }
         if wizard.result.is_some() {
             return Ok(wizard.result.take().unwrap_or_else(|| WizardResult {
@@ -635,17 +940,57 @@ pub async fn run(
     initial: Option<Host>,
     no_color: bool,
 ) -> Result<WizardResult> {
+    run_inner(paths, alias, initial, no_color, None).await
+}
+
+/// Edit an existing registered Host without silently changing its credentials.
+pub async fn run_edit(paths: &AppPaths, alias: String, no_color: bool) -> Result<WizardResult> {
+    let config = crate::config::Config::load(&paths.config)?;
+    let original = config.hosts.get(&alias).cloned().ok_or_else(|| {
+        AppError::new(
+            crate::error::ErrorCode::NotFound,
+            format!("host '{alias}' was not found"),
+        )
+    })?;
+    run_inner(
+        paths,
+        Some(alias),
+        Some(original.clone()),
+        no_color,
+        Some(original),
+    )
+    .await
+}
+
+async fn run_inner(
+    paths: &AppPaths,
+    alias: Option<String>,
+    initial: Option<Host>,
+    no_color: bool,
+    original: Option<Host>,
+) -> Result<WizardResult> {
     enable_raw_mode().map_err(|error| AppError::io("enable wizard terminal", error))?;
-    execute!(stdout(), EnterAlternateScreen)
-        .map_err(|error| AppError::io("enter host wizard", error))?;
+    if let Err(error) = execute!(stdout(), EnableBracketedPaste, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(AppError::io("enter host wizard", error));
+    }
     let backend = CrosstermBackend::new(stdout());
     let result = match Terminal::new(backend) {
-        Ok(mut terminal) => attach(&mut terminal, paths, alias, initial, no_color).await,
+        Ok(mut terminal) => attach(&mut terminal, paths, alias, initial, no_color, original).await,
         Err(error) => Err(AppError::io("create wizard terminal", error)),
     };
     let _ = disable_raw_mode();
-    let _ = execute!(stdout(), LeaveAlternateScreen);
+    let _ = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen);
     result
+}
+
+pub(crate) async fn test_registered_connection(
+    paths: &AppPaths,
+    alias: &str,
+    host: &Host,
+    language: crate::config::UiLanguage,
+) -> Result<(String, bool)> {
+    test_connection(paths, alias, host, language, false).await
 }
 
 async fn test_connection(
@@ -653,6 +998,7 @@ async fn test_connection(
     alias: &str,
     host: &Host,
     language: crate::config::UiLanguage,
+    pending: bool,
 ) -> Result<(String, bool)> {
     if host.raw_mode != RawMode::Allow {
         return Err(AppError::new(
@@ -672,6 +1018,17 @@ async fn test_connection(
             "Telnet has no encrypted connection test in this version. Its plaintext automation is not implemented.",
         ));
     }
+    let auth_context = if pending {
+        crate::transport::AuthenticationContext::pending(paths.clone(), alias, host)
+    } else {
+        crate::transport::AuthenticationContext::registered(paths.clone(), alias, host)
+    };
+    if auth_context.is_some() {
+        let client = BrokerClient::new(paths.clone());
+        if client.ping().await.is_err() {
+            client.ensure_running().await?;
+        }
+    }
     let started = std::time::Instant::now();
     let outcome = OpensshTransport::default()
         .exec(ExecutionRequest {
@@ -680,11 +1037,7 @@ async fn test_connection(
             timeout: Duration::from_secs(8),
             max_output: 2048,
             sudo_password: None,
-            auth_context: crate::transport::AuthenticationContext::pending(
-                paths.clone(),
-                alias,
-                host,
-            ),
+            auth_context,
         })
         .await;
     let digest = request_digest(&[alias, "connection_test", &host.destination()]);
@@ -725,7 +1078,7 @@ async fn test_connection(
             "failed",
             None,
             Some(format!("{:?}", error.code)),
-            crate::redact::sanitize(&error.message),
+            crate::i18n::error_message(&error, language),
         ),
     };
     if let Ok(log) = AuditLog::new(&paths.audit()) {
@@ -750,7 +1103,9 @@ async fn test_connection(
 }
 
 async fn configure_ssh_credentials(wizard: &mut Wizard, alias: &str, host: &Host) -> Result<()> {
-    if host.auth != AuthMode::VaultPassword && host.auth != AuthMode::VaultKey {
+    if wizard.draft.reuse_credentials()
+        || (host.auth != AuthMode::VaultPassword && host.auth != AuthMode::VaultKey)
+    {
         return Ok(());
     }
     if !wizard.client.ping().await.is_ok() {
@@ -767,13 +1122,13 @@ async fn configure_ssh_credentials(wizard: &mut Wizard, alias: &str, host: &Host
                 .call(RpcRequest::SetCredential {
                     name: crate::credential::ssh_credential_name(stem),
                     kind: "ssh-password".into(),
-                    value: password.to_string(),
+                    value: password.value().to_string(),
                 })
                 .await?,
         )?;
     } else {
         let name = crate::credential::key_credential_name(stem);
-        let path = std::path::absolute(&wizard.draft.private_key_path)
+        let path = std::path::absolute(wizard.draft.private_key_path())
             .map_err(|error| AppError::io("resolve private key import path", error))?;
         expect_secret_ack(
             wizard
@@ -793,7 +1148,7 @@ async fn configure_ssh_credentials(wizard: &mut Wizard, alias: &str, host: &Host
                     .call(RpcRequest::SetCredential {
                         name: crate::credential::ssh_credential_name(stem),
                         kind: "ssh-password".into(),
-                        value: password.to_string(),
+                        value: password.value().to_string(),
                     })
                     .await?,
             )?;
@@ -839,13 +1194,12 @@ async fn configure_sudo_if_requested(
         }));
     }
     crate::tui::suspend(terminal)?;
-    let password = rpassword::prompt_password(wizard.language.text(
-        "Independent sudo password (input hidden): ",
-        "独立的 sudo 密码（隐藏输入）：",
+    let password = crate::masked_prompt::prompt(wizard.language.text(
+        "Independent sudo password (masked with *): ",
+        "独立的 sudo 密码（以 * 掩码）：",
     ));
     crate::tui::resume(terminal)?;
-    let password = password.map_err(|error| AppError::io("read hidden sudo password", error))?;
-    let value = Zeroizing::new(password);
+    let value = password?;
     if host.auth == AuthMode::ExternalAgent && !check_agent_available(host) {
         // Agent state is informational here; no unsupported automatic privilege path is attempted.
     }
@@ -886,6 +1240,21 @@ fn label(index: usize, language: crate::config::UiLanguage) -> &'static str {
     }
 }
 
+fn field_label(wizard: &Wizard, index: usize) -> &'static str {
+    match (wizard.original.is_some(), index, wizard.language) {
+        (true, 0, crate::config::UiLanguage::En) => "Alias (fixed)",
+        (true, 0, crate::config::UiLanguage::ZhCn) => "主机别名（固定）",
+        (true, 15, crate::config::UiLanguage::En) => "[ Save & test ]",
+        (true, 15, crate::config::UiLanguage::ZhCn) => "[ 保存并测试 ]",
+        _ => label(index, wizard.language),
+    }
+}
+
+fn pad_display(value: &str, width: usize) -> String {
+    let padding = width.saturating_sub(display_width(value));
+    format!("{value}{}", " ".repeat(padding))
+}
+
 fn color(no_color: bool, color: Color) -> Style {
     if no_color || std::env::var_os("NO_COLOR").is_some() {
         Style::default()
@@ -906,10 +1275,17 @@ fn draw(frame: &mut ratatui::Frame, wizard: &Wizard) {
             "Remxo",
             color(wizard.no_color, Color::Cyan).add_modifier(Modifier::BOLD),
         )),
-        Line::from(wizard.language.text(
-            "Add host · connection → policy → review",
-            "添加主机 · 连接 → 策略 → 复核",
-        )),
+        Line::from(if wizard.original.is_some() {
+            wizard.language.text(
+                "Edit host · connection → credentials → review",
+                "编辑主机 · 连接 → 凭据 → 复核",
+            )
+        } else {
+            wizard.language.text(
+                "Add host · connection → policy → review",
+                "添加主机 · 连接 → 策略 → 复核",
+            )
+        }),
         Line::from(Span::styled(
             wizard.language.text(
                 "Remote execution for humans and agents · L1 local broker",
@@ -936,13 +1312,31 @@ fn draw(frame: &mut ratatui::Frame, wizard: &Wizard) {
         .focused
         .saturating_sub(visible.saturating_sub(1))
         .min(16usize.saturating_sub(visible.saturating_sub(1)));
+    let label_width = body[0].width.saturating_sub(11).min(27) as usize;
+    let value_offset = 4 + label_width as u16;
+    let value_width = body[0].width.saturating_sub(value_offset + 1).max(1) as usize;
+    let mut cursor_position = None;
     let items = (start..=16.min(start + visible.saturating_sub(1)))
         .map(|index| {
             let selected = index == wizard.focused;
             let indicator = if selected { " > " } else { "   " };
+            let value = if selected && let Some(input) = wizard.draft.input(index) {
+                let (window, cursor_column) =
+                    input.window(value_width, (index == 13).then_some('*'));
+                let x = (body[0].x + value_offset + cursor_column.min(value_width - 1) as u16)
+                    .min(body[0].x + body[0].width.saturating_sub(2));
+                let y = body[0].y + 1 + index.saturating_sub(start) as u16;
+                cursor_position = Some((x, y));
+                window
+            } else {
+                crate::redact::escape_controls(&wizard.draft.value(index, wizard.language))
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!("{indicator}{:<27}", label(index, wizard.language)),
+                    format!(
+                        "{indicator}{}",
+                        pad_display(field_label(wizard, index), label_width)
+                    ),
                     color(
                         wizard.no_color,
                         if selected { Color::Cyan } else { Color::Gray },
@@ -954,7 +1348,7 @@ fn draw(frame: &mut ratatui::Frame, wizard: &Wizard) {
                     }),
                 ),
                 Span::styled(
-                    crate::redact::escape_controls(&wizard.draft.value(index, wizard.language)),
+                    value,
                     color(
                         wizard.no_color,
                         if selected { Color::White } else { Color::Gray },
@@ -993,8 +1387,8 @@ fn draw(frame: &mut ratatui::Frame, wizard: &Wizard) {
         Line::from(Span::styled(wizard.message.clone(), message_style)),
         Line::from(Span::styled(
             wizard.language.text(
-                "↑/↓ navigate · ←/→ change · Backspace/Delete edit · Enter next/test/save · Esc cancel",
-                "↑/↓ 导航 · ←/→ 切换 · Backspace/Delete 编辑 · Enter 下一步/测试/保存 · Esc 取消",
+                "↑/↓ fields · ←/→ cursor/options · Home/End · Backspace/Delete · Ctrl+L clear · Enter next",
+                "↑/↓ 字段 · ←/→ 光标/选项 · Home/End · 退格/Delete · Ctrl+L 清空 · Enter 下一步",
             ),
             color(wizard.no_color, Color::Gray),
         )),
@@ -1012,16 +1406,21 @@ fn draw(frame: &mut ratatui::Frame, wizard: &Wizard) {
             .title(wizard.language.text("Help & status", "帮助与状态")),
     );
     frame.render_widget(footer, columns[2]);
+    if let Some(position) = cursor_position {
+        frame.set_cursor_position(position);
+    }
 }
 
 fn draw_preview(frame: &mut ratatui::Frame, wizard: &Wizard, area: ratatui::layout::Rect) {
     let wizard_error = wizard.draft.host().err();
-    let error_text = wizard_error.map(|error| error.message).unwrap_or_else(|| {
-        wizard
-            .language
-            .text("configuration ready for review", "配置已可复核")
-            .into()
-    });
+    let error_text = wizard_error
+        .map(|error| crate::i18n::error_message(&error, wizard.language))
+        .unwrap_or_else(|| {
+            wizard
+                .language
+                .text("configuration ready for review", "配置已可复核")
+                .into()
+        });
     let auth = match wizard.draft.mode {
         ConnectionMode::Telnet => wizard.language.text("INSECURE transport", "不加密传输"),
         _ if wizard.draft.auth == AuthMode::ExternalAgent
@@ -1043,7 +1442,7 @@ fn draw_preview(frame: &mut ratatui::Frame, wizard: &Wizard, area: ratatui::layo
         )),
         Line::from(format!(
             "alias: {}",
-            crate::redact::escape_controls(&wizard.draft.alias)
+            crate::redact::escape_controls(wizard.draft.alias.value())
         )),
         Line::from(format!(
             "connection: {}",
@@ -1054,16 +1453,17 @@ fn draw_preview(frame: &mut ratatui::Frame, wizard: &Wizard, area: ratatui::layo
             if wizard.draft.address.is_empty() {
                 "(required)".into()
             } else {
-                crate::redact::escape_controls(&wizard.draft.address)
+                crate::redact::escape_controls(wizard.draft.address.value())
             }
         )),
         Line::from(format!(
             "port: {} · host number: {}",
-            wizard.draft.port, wizard.draft.number
+            wizard.draft.port.value(),
+            wizard.draft.number.value()
         )),
         Line::from(format!(
             "environment: {} · platform: {:?}",
-            crate::redact::escape_controls(&wizard.draft.environment),
+            crate::redact::escape_controls(wizard.draft.environment.value()),
             wizard.draft.platform
         )),
         Line::from(Span::styled(auth, color(wizard.no_color, Color::Yellow))),
@@ -1132,8 +1532,10 @@ mod tests {
                 ..Host::default()
             },
         );
-        let mut draft = Draft::new(Some("prod".into()), None, &config);
-        draft.address = "real-prod".into();
+        let mut draft = Draft::new(Some("prod".into()), None, &config, false)
+            .unwrap_or_else(|error| panic!("draft: {error}"));
+        draft.address = TextInput::with_value("real-prod", 256)
+            .unwrap_or_else(|error| panic!("address: {error}"));
         let (alias, host) = draft
             .host()
             .unwrap_or_else(|error| panic!("draft: {error}"));
@@ -1150,13 +1552,14 @@ mod tests {
 
     #[test]
     fn text_editing_keeps_numeric_fields_bounded_and_not_secret() {
-        let mut draft = Draft::new(None, None, &Config::default());
+        let mut draft = Draft::new(None, None, &Config::default(), false)
+            .unwrap_or_else(|error| panic!("draft: {error}"));
         draft.type_character(4, '2');
         draft.type_character(4, '2');
         draft.type_character(4, 'x');
-        assert_eq!(draft.port, "2222");
+        assert_eq!(draft.port.value(), "2222");
         draft.backspace(4);
-        assert_eq!(draft.port, "222");
+        assert_eq!(draft.port.value(), "222");
         draft.clear(2);
         assert!(draft.host().is_err());
     }
@@ -1171,7 +1574,9 @@ mod tests {
         let mut wizard = Wizard::new(&paths, None, None, false)
             .unwrap_or_else(|error| panic!("wizard: {error}"));
         wizard.focused = 13;
-        wizard.draft.ssh_password = Some(Zeroizing::new("two".into()));
+        wizard.draft.ssh_password = Some(
+            TextInput::with_value("two", 4096).unwrap_or_else(|error| panic!("secret: {error}")),
+        );
         let auth = wizard.draft.auth;
         wizard.handle_key(KeyCode::Char(' '));
         wizard.handle_key(KeyCode::Char('x'));
@@ -1180,36 +1585,127 @@ mod tests {
                 .draft
                 .ssh_password
                 .as_ref()
-                .map(|value| value.as_str()),
+                .map(|value| value.value()),
             Some("two x"),
             "space must stay in a password rather than cycling authentication"
         );
         assert_eq!(wizard.draft.auth, auth);
         wizard.focused = 14;
-        wizard.draft.private_key_path = "with".into();
+        wizard.draft.private_key_path =
+            TextInput::with_value("with", 512).unwrap_or_else(|error| panic!("path: {error}"));
         wizard.handle_key(KeyCode::Char(' '));
         wizard.handle_key(KeyCode::Char('k'));
-        assert_eq!(wizard.draft.private_key_path, "with k");
+        assert_eq!(wizard.draft.private_key_path.value(), "with k");
     }
 
     #[test]
     fn secret_values_are_never_rendered() {
-        let mut draft = Draft::new(None, None, &Config::default());
+        let mut draft = Draft::new(None, None, &Config::default(), false)
+            .unwrap_or_else(|error| panic!("draft: {error}"));
         draft.auth = AuthMode::VaultPassword;
-        draft.ssh_password = Some(Zeroizing::new("test-only-never-render-this".into()));
+        draft.ssh_password = Some(
+            TextInput::with_value("test-only-never-render-this", 4096)
+                .unwrap_or_else(|error| panic!("secret: {error}")),
+        );
+        let expected_mask = "*".repeat(
+            draft
+                .ssh_password
+                .as_ref()
+                .map(TextInput::len_chars)
+                .unwrap_or_default(),
+        );
         assert_eq!(
             draft.value(13, crate::config::UiLanguage::En),
-            "entered (hidden)"
+            expected_mask
         );
         assert_eq!(
             draft.value(13, crate::config::UiLanguage::ZhCn),
-            "已输入（隐藏）"
+            expected_mask
         );
         assert!(
             !draft
                 .value(13, crate::config::UiLanguage::En)
                 .contains("test-only-never-render-this")
         );
+    }
+
+    #[test]
+    fn edit_reuses_credentials_and_rotates_only_when_explicitly_replaced() {
+        let original = Host {
+            hostname: Some("oracle.example".into()),
+            username: Some("ubuntu".into()),
+            auth: AuthMode::VaultKey,
+            credential: Some("oracle-production".into()),
+            ..Host::default()
+        };
+        let mut draft = Draft::new(
+            Some("oracle".into()),
+            Some(original.clone()),
+            &Config::default(),
+            true,
+        )
+        .unwrap_or_else(|error| panic!("draft: {error}"));
+        let (_, unchanged) = draft
+            .host()
+            .unwrap_or_else(|error| panic!("unchanged: {error}"));
+        assert_eq!(unchanged.credential, original.credential);
+        assert!(draft.reuse_credentials());
+
+        draft.move_home(0);
+        draft.delete(0);
+        assert_eq!(draft.alias.value(), "oracle");
+        draft.paste(14, "\"C:\\test\\id_ed25519\"");
+        let (_, rotated) = draft
+            .host()
+            .unwrap_or_else(|error| panic!("rotated: {error}"));
+        assert_eq!(draft.private_key_path(), "C:\\test\\id_ed25519");
+        assert!(!draft.reuse_credentials());
+        assert_ne!(rotated.credential, original.credential);
+        assert!(
+            rotated
+                .credential
+                .as_deref()
+                .is_some_and(|stem| stem.starts_with("oracle:rotation:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn nonsecret_edit_does_not_require_a_running_broker_or_secret_reentry() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        crate::config::Config::initialize(&paths.config)
+            .unwrap_or_else(|error| panic!("config: {error}"));
+        let original = Host {
+            hostname: Some("192.0.2.40".into()),
+            username: Some("ubuntu".into()),
+            auth: AuthMode::VaultPassword,
+            credential: Some("oracle-original".into()),
+            ..Host::default()
+        };
+        crate::host::add_host(&paths, "oracle", original.clone())
+            .unwrap_or_else(|error| panic!("add: {error}"));
+        let mut wizard = Wizard::with_original(
+            &paths,
+            Some("oracle".into()),
+            Some(original.clone()),
+            Some(original),
+            true,
+        )
+        .unwrap_or_else(|error| panic!("wizard: {error}"));
+        wizard.draft.clear(3);
+        wizard.draft.paste(3, "opc");
+        let (alias, host) = wizard
+            .draft
+            .host()
+            .unwrap_or_else(|error| panic!("draft host: {error}"));
+        persist_host(&mut wizard, &paths, &alias, &host)
+            .await
+            .unwrap_or_else(|error| panic!("persist: {error}"));
+        let after = Config::load(&paths.config).unwrap_or_else(|error| panic!("load: {error}"));
+        assert_eq!(after.hosts.get("oracle"), Some(&host));
+        assert_eq!(host.username.as_deref(), Some("opc"));
+        assert_eq!(host.credential.as_deref(), Some("oracle-original"));
     }
 
     #[test]
@@ -1252,7 +1748,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("config: {error}"));
         let mut wizard = Wizard::new(&paths, Some("prod-01".into()), None, false)
             .unwrap_or_else(|error| panic!("wizard: {error}"));
-        wizard.draft.address = "example.invalid".into();
+        wizard.draft.address = TextInput::with_value("example.invalid", 256)
+            .unwrap_or_else(|error| panic!("address: {error}"));
         wizard.focused = 16;
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(96, 24))
             .unwrap_or_else(|error| panic!("terminal: {error}"));

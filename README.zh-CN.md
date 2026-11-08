@@ -14,7 +14,7 @@ Remxo 是本地远程服务器清单、编排与执行工具。它复用系统 O
 - 通过 `argv` 启动 OpenSSH 单次命令和交互式 SSH，不调用本地 `sh -c`，不关闭主机密钥检查。
 - 四种认证模式：`openssh-config`、`external-agent`、`vault-password` 和 `vault-key`。
 - OpenSSH 配置/外部 Agent 非交互认证使用 `BatchMode=yes`；Vault 认证使用 `BatchMode=no`、强制 ASKPASS 和一次密码提示。
-- 在 TUI/CLI 中隐藏输入 SSH 密码和私钥口令；Vault 支持从常规文件导入 OpenSSH/RSA/EC/PKCS#8 PEM 私钥，拒绝 symlink，大小不超过 1 MiB。
+- 在 TUI/CLI 中以 `*` 掩码输入 SSH 密码和私钥口令，支持可见光标编辑；Vault 支持从常规文件导入 OpenSSH/RSA/EC/PKCS#8 PEM 私钥，拒绝 symlink，大小不超过 1 MiB。
 - Argon2id 派生 KEK、随机 DEK、XChaCha20Poly1305 加密 Vault。Broker 启动即锁定，修改主密码只重新包裹同一个 DEK。
 - 独立加密的 `.rxb` 备份、验证、冲突检测、全新目录恢复。备份嵌套携带仍加密的 Vault，不包含明文 DEK、Socket、任务、审批或日志。
 - 同用户 loopback Broker、随机 IPC token、受限请求。普通操作结果不包含 Vault；内部认证 RPC 可在 SSH 认证需要时返回单条带类型的 Secret。
@@ -40,7 +40,7 @@ Linux 下可运行自包含 fake、PTY 与可选 Docker/真实 sshd 测试，无
 python3 tests/run_all.py
 ```
 
-测试分层、清理规则、环境要求和当前验证边界见 [TESTING.md](TESTING.md)。2026-11-08 本次工作副本已通过 Windows 原生 Clippy、全目标 Rust 测试和构建，并在隔离 Instabox 上完整通过 Linux `python3 tests/run_all.py`（fake、5 个 PTY 用例、真实 SSH/SFTP/隧道/任务、Vault 密码/加密私钥执行与 SCP、sudo 和清理）。这些结果不证明 Windows 原生 ACL/真实 Vault 认证、所有 Vault task/tunnel/交互路径、崩溃清理或通用服务端兼容性。
+测试分层、清理规则、环境要求和当前验证边界见 [TESTING.md](TESTING.md)。2026-11-08 本次工作副本已通过 Windows 原生 Clippy、全目标 Rust 测试和构建，并在隔离 Instabox 上完整通过 Linux `python3 tests/run_all.py`（fake、6 个 PTY 用例（含中文数字初始化/中文解锁、掩码、光标主机编辑和保存后 `doctor`）、真实 SSH/SFTP/隧道/任务、Vault 密码/加密私钥执行与 SCP、sudo 和清理）。这些结果不证明 Windows 原生 ACL/真实 Vault 认证、所有 Vault task/tunnel/交互路径、崩溃清理或通用服务端兼容性。
 
 `REMXO_SSH`、`REMXO_SCP` 可指向隔离的测试 fake。真实主机操作时，不要把它们指向不可信程序。
 
@@ -49,7 +49,7 @@ python3 tests/run_all.py
 主密码和备份密码都至少需要 12 字节，只能在交互终端的隐藏提示中输入。短密码会在写入任何配置或 Vault 之前被拒绝。若先前操作留下有效 `config.toml` 但缺少 `vault.json`，重新运行 `init` 会保留该配置并只补齐 Locked Vault，不会重置配置或重新包裹已有 Vault。
 
 ```console
-# 显式选择 UI 语言；密码通过隐藏提示输入。
+# 显式选择 UI 语言；密码输入显示 * 掩码。
 remxo init --lang en
 # 或选择简体中文：
 remxo init --lang zh-CN
@@ -66,16 +66,20 @@ remxo prod-01 ls -la
 remxo 2 df -h
 remxo --json prod-01 'cd /var/www && git status'
 remxo --cwd /var/www prod-01 ls -la
+remxo host edit prod-01
+remxo doctor prod-01
 remxo prod-01 --profile logs --arg service=nginx --arg lines=100
 ```
 
-未指定 `--lang` 时，TTY 会提供英文/简体中文选择，空回答默认英文。`--json` 或非 TTY 调用默认选择英文，不强制提出语言问题；隐藏主密码输入仍要求交互终端。不含 `settings.language` 的旧配置默认 `en`。恢复已有有效配置时，无论恢复消息选择哪种语言，都会保留配置中保存的语言。主 TUI 和向导遵循该配置语言；这不表示所有 CLI/JSON 错误都已本地化。
+未指定 `--lang` 时，TTY 会提供带编号的语言菜单（`1` 为英文，`2` 为简体中文），空回答默认英文；交互提示仍接受语言名称，而 `--lang` 保持接受 `en|zh-CN`。`--json` 或非 TTY 调用默认选择英文，不强制提出语言问题；显示 `*` 掩码的主密码输入仍要求交互终端。不含 `settings.language` 的旧配置默认 `en`。恢复已有有效配置时，无论恢复消息选择哪种语言，都会保留配置中保存的语言。`unlock` 根据保存的语言显示隐藏输入提示和成功消息。主 TUI 和向导遵循该配置语言；这不表示所有 CLI/JSON 错误都已本地化。
 
 target 前的全局参数包括 `--json`、`--no-color`、`--timeout`、`--max-output`、`--cwd`、`--config`、`--verbose`、`--sudo`、`--overwrite`。target 后的参数属于远程命令，例如 `remxo prod-01 ls -l --help` 不会把远程 `--help` 当成本地帮助。
 
 在 `openssh-config`/`external-agent` 模式下，TTY 中无 command 会打开交互式 SSH；非 TTY 无 command 是用法错误。裸 `remxo` 只在真正的交互 TTY 中进入 TUI。子命令名和全局选项位置保留给 CLI，主机别名不应与之冲突。TUI 主机列表中的 **Enter** 路径会为 Vault 管理的交互式 SSH 提供 Broker 认证上下文。
 
 与 OpenSSH 首次连接所需的主机密钥确认应由人类提前完成。Remxo 从不自动添加 `StrictHostKeyChecking=no`、`UserKnownHostsFile=/dev/null` 或 `ForwardAgent=yes`。
+
+`remxo doctor [alias]` 先检查本地配置；指定 alias 时，才按用户显式操作，通过同一套认证准备对保存的 Host 执行有界的 POSIX `true` 握手。它报告连接结果，不放宽主机密钥检查，不执行写入命令，也不会在后台自动监视连接。
 
 ## SSH 认证与 Vault 凭据
 
@@ -100,7 +104,9 @@ remxo vault import-key prod-01 --path /path/to/id_ed25519
 remxo vault set-ssh-password prod-01
 ```
 
-私钥路径可以作为选项传入，也可在 TUI 可见字段中输入；它不是私钥内容，也不会持久化到 Host 对象。相对路径会先按调用者的工作目录转换为绝对路径，再交给 Broker，不受 daemon 工作目录变化影响。密码/口令字段隐藏，只显示“entered (hidden)”/“已输入（隐藏）”。导入只接受常规文件，拒绝 symlink、目录和特殊文件，源文件上限为 1 MiB。ASCII 文本 PEM 的第一个私钥标记必须指明 OpenSSH、RSA、EC 或 PKCS#8 格式。这只是结构上的导入校验，并不证明 OpenSSH 能解析或使用该私钥。原文件不会被删除或修改。
+私钥路径可以作为选项传入，也可在 TUI 可见字段中输入；它不是私钥内容，也不会持久化到 Host 对象。相对路径会先按调用者的工作目录转换为绝对路径，再交给 Broker，不受 daemon 工作目录变化影响。密码/口令字段只显示 `*` 掩码，不显示秘密值，也不会进入表单预览。导入只接受常规文件，拒绝 symlink、目录和特殊文件，源文件上限为 1 MiB。ASCII 文本 PEM 的第一个私钥标记必须指明 OpenSSH、RSA、EC 或 PKCS#8 格式。这只是结构上的导入校验，并不证明 OpenSSH 能解析或使用该私钥。原文件不会被删除或修改。
+
+导入私钥不会自动给服务器授权对应公钥。请选择私钥文件而不是 `.pub`，加密私钥需配置口令，使用正确的远端用户名，并确保对应公钥已写入该账号的 `authorized_keys` 或等价服务端授权配置。Remxo 不会自动上传公钥，也不能在没有真实认证尝试的情况下断言服务端已授权。
 
 exec、task、Broker SCP、交互式 SFTP、由 TUI 启动的交互式 SSH 和 tunnel 共用 `prepare_authentication`。使用 Vault 私钥时，Broker 通过内部认证 RPC 返回私钥，调用方将它写入供 OpenSSH 使用的受限临时文件。临时私钥 guard 会持续到操作/子进程结束，正常 drop 时删除文件。崩溃或强制终止可能留下残余；删除也不等于保证安全擦除。
 
@@ -118,24 +124,31 @@ Vault 密码/私钥认证会把当前 Remxo 可执行文件设为 ASKPASS，由 
 remxo host add
 remxo host add prod-01
 remxo host add prod-01 --interactive
-# 在 Remxo 主 TUI 的 Hosts 页面也可按 a。
+# 在主 TUI 的 Hosts 页面按 a。
+remxo host edit prod-01
+# 已登记主机也可在 Hosts 页面按 e，按 t 显式测试当前保存的连接。
 ```
 
-向导采用连接 → 策略 → 复核流程，支持别名预填、端口/编号检查、环境、平台、全部四种认证模式、raw/approval 策略、可选 sudo、Telnet INSECURE 确认和配置预览。Vault 模式会增加隐藏的 SSH 密码/私钥口令字段和私钥路径字段。焦点使用颜色区分，状态单独显示，窄终端自动收起侧栏；`--no-color` 或 `NO_COLOR` 可关闭该处彩色样式。主 TUI 和向导标签根据 `settings.language` 显示英文或简体中文。
+向导采用连接 → 策略 → 复核流程，支持别名预填、端口/编号检查、环境、平台、全部四种认证模式、raw/approval 策略、可选 sudo、Telnet INSECURE 确认和配置预览。Vault 模式的 SSH 密码/私钥口令只显示 `*` 掩码，私钥路径可见编辑。文本字段有真实光标，支持左右移动、Home/End、中间插入、Backspace/Delete、括号粘贴以及 Ctrl+U/Ctrl+W/Ctrl+L；粘贴私钥路径时，成对包裹路径的单引号或双引号会在导入时移除，其他秘密输入不做这种处理。焦点使用颜色区分，状态单独显示，窄终端自动收起侧栏；`--no-color` 或 `NO_COLOR` 可关闭该处彩色样式。主 TUI 和向导标签根据 `settings.language` 显示英文或简体中文。
 
 快捷键：
 
 ```text
 ↑ / ↓          移动字段焦点
-← / → / Space  切换选项
-Enter          下一步、测试连接或保存
+← / →          移动光标或切换选项
+Home / End     移动到文本字段开头/结尾
+粘贴           在光标处插入（bracketed paste）
+Backspace      删除光标前一个字符
+Delete         删除光标处字符
+Ctrl+U/W/L     删至开头 / 删除前一个词 / 清空字段
+Enter          下一步、测试、保存或保存并测试
 Tab / BackTab  移动字段焦点
-Backspace      删除一个字符
-Delete         清空字段
 Esc            取消且不保存 Host
 ```
 
-凭据导入有意**不是**全事务的 Host 操作。Test 和 Save 都会先把选择的 SSH 密码/口令和/或私钥导入加密 Vault。Test 失败或按 Esc 不保存 Host，但已导入的凭据仍以密文留在 Vault。Save 仅在 SSH 凭据导入成功后写入 Host；直接 Save 不要求此前成功执行过 Test。可选 sudo 在 Host 保存后另行配置，sudo 失败不会回滚 Host。任何秘密值都不会进入预览、Host 对象、argv 或元数据审计。
+凭据导入有意**不是**全事务的 Host 操作。新建 Host 时，Test 和 Save 都会先把选择的 SSH 密码/口令和/或私钥导入加密 Vault。Test 失败或按 Esc 不保存 Host，但已导入的凭据仍以密文留在 Vault。Save 仅在 SSH 凭据导入成功后写入 Host；直接 Save 不要求此前成功执行过 Test。可选 sudo 在 Host 保存后另行配置，sudo 失败不会回滚 Host。任何秘密值都不会进入预览、Host 对象、argv 或元数据审计。
+
+`host edit` 固定 alias，并通过 expected-Host 检查防止旧表单静默覆盖更新后的配置。仅修改非秘密字段会沿用现有凭据，不要求重新输入。显式更换凭据或认证方式会使用带版本的 credential stem，因此 Host 保存失败不会在配置引用切换前替换旧 Host 正在使用的秘密。旧凭据仍以密文保留，不承诺配置与 Vault 的整体回滚，也不自动安全删除。保存并测试会先写入编辑后的 Host，再按正式登记 Host 的连接测试路径执行；已登记 alias 不使用 pending Host。测试失败不会回滚已经保存的编辑。
 
 带完整 `--hostname`/`--ssh-alias` 参数的传统非交互调用继续有效。向导与 `--json` 不兼容，也不会在非 TTY 中启动。连接探针保持严格主机密钥检查并使用上述认证行为，不替代主机授权审查或生产巡检。
 
@@ -174,7 +187,7 @@ remxo backup verify ./remxo.rxb
 remxo --config /new-dir/config.toml backup restore ./remxo.rxb
 ```
 
-备份密码与主密码都是隐藏输入，不能通过 CLI 秘密参数传入。恢复后仍使用**原 Vault 主密码**显式 `unlock`；备份密码只保护备份外层。已导入的 SSH 密码、口令、私钥和 sudo 凭据仍位于备份内嵌套的加密 Vault 中。外部 Agent 秘密、平台生物识别以及外部私钥/硬件密钥不会导出到备份。
+备份密码与主密码只显示 `*` 掩码，不能通过 CLI 秘密参数传入。恢复后仍使用**原 Vault 主密码**显式 `unlock`；备份密码只保护备份外层。已导入的 SSH 密码、口令、私钥和 sudo 凭据仍位于备份内嵌套的加密 Vault 中。外部 Agent 秘密、平台生物识别以及外部私钥/硬件密钥不会导出到备份。
 
 ## 文件传输、隧道和任务
 
@@ -209,7 +222,7 @@ SCP 使用 `scp -s` 强制 SFTP 模式，避免 legacy SCP 的远端 shell 路�
 - 仅 L1；同用户进程、root 或本机失陷不在保护范围。单 Secret 认证 RPC 和明文交接点不构成同用户隔离。详见 [SECURITY.md](SECURITY.md) 与 [THREAT_MODEL.md](THREAT_MODEL.md)。
 - Telnet 数据模型、INSECURE 标记和未确认拒绝已实现，但网络自动化尚未实现；Vault 加密不代表 Telnet 网络加密。
 - 仅 POSIX 非交互命令组合受支持；PowerShell、CMD、device/custom 返回明确不支持，不套用 POSIX 引用。
-- TUI 支持监视、搜索、添加主机、lock/unlock 和交互 SSH；主机编辑/删除向导、TUI 审批/备份操作、设置编辑仍在后续阶段。
+- TUI 支持监视、搜索、添加/编辑主机、显式连接测试、lock/unlock 和交互 SSH；删除向导、TUI 审批/备份操作仍在后续阶段。设置支持语言、超时和输出上限修改，并原子保存配置。
 - 任务不会在 Broker 重启后恢复；远程脱离执行、连接复用和通用 SSH 服务端兼容性既未全部实现，也未得到证明。
 - Windows 原生权限加固和真实 Vault 密码/私钥认证尚未验证。不得把 Unix 临时文件 `0600` 行为宣称为已验证的 Windows ACL 行为或跨平台认证支持。
 - 生物识别解锁、Linux Secret Service、TPM、L2 独立 OS 用户 Broker、L3 短期证书与集中授权尚未实现。

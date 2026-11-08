@@ -6,7 +6,9 @@ use crate::error::{AppError, Result};
 use crate::task::TaskSummary;
 use crate::transport::openssh::OpensshTransport;
 use crate::tunnel::TunnelSummary;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -40,7 +42,7 @@ fn pages(language: crate::config::UiLanguage) -> &'static [&'static str; 7] {
 struct App {
     page: usize,
     selected: usize,
-    search: String,
+    search: crate::text_input::TextInput,
     searching: bool,
     message: String,
     tasks: Vec<TaskSummary>,
@@ -57,7 +59,7 @@ impl Default for App {
         Self {
             page: 0,
             selected: 0,
-            search: String::new(),
+            search: crate::text_input::TextInput::new(256),
             searching: false,
             message: "L1 development build — remote output is untrusted".into(),
             tasks: Vec::new(),
@@ -71,6 +73,45 @@ impl Default for App {
     }
 }
 
+enum SettingsAction {
+    Language,
+    Timeout(i64),
+    MaxOutput(i64),
+}
+
+fn change_settings(paths: &AppPaths, app: &mut App, action: SettingsAction) -> Result<String> {
+    let mut config = Config::load(&paths.config)?;
+    match action {
+        SettingsAction::Language => {
+            config.settings.language = match config.settings.language {
+                crate::config::UiLanguage::En => crate::config::UiLanguage::ZhCn,
+                crate::config::UiLanguage::ZhCn => crate::config::UiLanguage::En,
+            };
+        }
+        SettingsAction::Timeout(delta) => {
+            let current = config.settings.timeout_seconds.min(i64::MAX as u64) as i64;
+            config.settings.timeout_seconds = current.saturating_add(delta).clamp(5, 3600) as u64;
+        }
+        SettingsAction::MaxOutput(delta) => {
+            let current = config.settings.max_output.min(i64::MAX as usize) as i64;
+            config.settings.max_output =
+                current.saturating_add(delta).clamp(1024, 64 * 1024 * 1024) as usize;
+        }
+    }
+    config.save(&paths.config)?;
+    app.language = config.settings.language;
+    Ok(match config.settings.language {
+        crate::config::UiLanguage::ZhCn => format!(
+            "设置已保存：语言 {}，超时 {} 秒，输出上限 {} 字节。",
+            "zh-CN", config.settings.timeout_seconds, config.settings.max_output
+        ),
+        crate::config::UiLanguage::En => format!(
+            "Settings saved: language {}, timeout {}s, max output {} bytes.",
+            "en", config.settings.timeout_seconds, config.settings.max_output
+        ),
+    })
+}
+
 pub async fn run(paths: AppPaths) -> Result<()> {
     run_with_options(paths, false).await
 }
@@ -78,7 +119,7 @@ pub async fn run(paths: AppPaths) -> Result<()> {
 pub async fn run_with_options(paths: AppPaths, no_color: bool) -> Result<()> {
     let no_color = no_color || std::env::var_os("NO_COLOR").is_some();
     enable_raw_mode().map_err(|e| AppError::io("enable TUI raw mode", e))?;
-    if let Err(error) = execute!(stdout(), EnterAlternateScreen) {
+    if let Err(error) = execute!(stdout(), EnableBracketedPaste, EnterAlternateScreen) {
         let _ = disable_raw_mode();
         return Err(AppError::io("enter alternate screen", error));
     }
@@ -88,7 +129,7 @@ pub async fn run_with_options(paths: AppPaths, no_color: bool) -> Result<()> {
         Err(error) => Err(AppError::io("create TUI terminal", error)),
     };
     let _ = disable_raw_mode();
-    let _ = execute!(stdout(), LeaveAlternateScreen);
+    let _ = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen);
     result
 }
 
@@ -131,7 +172,15 @@ async fn run_loop(
         {
             continue;
         }
-        let Event::Key(key) = event::read().map_err(|e| AppError::io("read TUI input", e))? else {
+        let incoming = event::read().map_err(|e| AppError::io("read TUI input", e))?;
+        if app.searching
+            && let Event::Paste(text) = incoming
+        {
+            let _ = app.search.paste(&text);
+            app.selected = 0;
+            continue;
+        }
+        let Event::Key(key) = incoming else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -145,9 +194,25 @@ async fn run_loop(
                 }
                 KeyCode::Enter => app.searching = false,
                 KeyCode::Backspace => {
-                    app.search.pop();
+                    app.search.backspace();
+                    app.selected = 0;
                 }
-                KeyCode::Char(character) => app.search.push(character),
+                KeyCode::Delete => {
+                    app.search.delete();
+                    app.selected = 0;
+                }
+                KeyCode::Left => {
+                    app.search.move_left();
+                }
+                KeyCode::Right => {
+                    app.search.move_right();
+                }
+                KeyCode::Home => app.search.move_home(),
+                KeyCode::End => app.search.move_end(),
+                KeyCode::Char(character) => {
+                    let _ = app.search.insert_char(character);
+                    app.selected = 0;
+                }
                 _ => {}
             }
             continue;
@@ -158,6 +223,18 @@ async fn run_loop(
             KeyCode::BackTab | KeyCode::Left => {
                 app.page = (app.page + PAGES_EN.len() - 1) % PAGES_EN.len()
             }
+            KeyCode::Down if app.page == 0 => {
+                let maximum = config
+                    .as_ref()
+                    .ok()
+                    .map(|config| {
+                        filtered_hosts(config, app.search.value())
+                            .len()
+                            .saturating_sub(1)
+                    })
+                    .unwrap_or(0);
+                app.selected = app.selected.saturating_add(1).min(maximum);
+            }
             KeyCode::Down => app.selected = app.selected.saturating_add(1),
             KeyCode::Up => app.selected = app.selected.saturating_sub(1),
             KeyCode::Char('a') if app.page == 0 => {
@@ -166,7 +243,94 @@ async fn run_loop(
                 resume(&mut terminal)?;
                 match result {
                     Ok(result) => app.message = result.message,
-                    Err(error) => app.message = error.message,
+                    Err(error) => app.message = crate::i18n::error_message(&error, app.language),
+                }
+            }
+            KeyCode::Char('e') if app.page == 0 => {
+                if let Ok(config) = &config {
+                    let aliases = filtered_hosts(config, app.search.value());
+                    if let Some(alias) = aliases.get(app.selected).copied() {
+                        suspend(&mut terminal)?;
+                        let result =
+                            crate::tui_wizard::run_edit(&paths, alias.to_string(), app.no_color)
+                                .await;
+                        resume(&mut terminal)?;
+                        match result {
+                            Ok(result) => app.message = result.message,
+                            Err(error) => {
+                                app.message = crate::i18n::error_message(&error, app.language)
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(page @ '1'..='7') => {
+                app.page = (page as usize - '1' as usize).min(PAGES_EN.len() - 1);
+                app.selected = 0;
+            }
+            KeyCode::Char('t') if app.page == 0 => {
+                if let Ok(config) = &config {
+                    let aliases = filtered_hosts(config, app.search.value());
+                    if let Some(alias) = aliases.get(app.selected).copied()
+                        && let Some(host) = config.hosts.get(alias)
+                    {
+                        app.message = app
+                            .language
+                            .text(
+                                "Testing the saved connection; no write command will run.",
+                                "正在测试已保存的连接，不会执行写入命令。",
+                            )
+                            .into();
+                        terminal
+                            .draw(|frame| draw(frame, &app, Some(config)))
+                            .map_err(|error| AppError::io("draw connection test status", error))?;
+                        app.message = match crate::tui_wizard::test_registered_connection(
+                            &paths,
+                            alias,
+                            host,
+                            app.language,
+                        )
+                        .await
+                        {
+                            Ok((message, _)) => message,
+                            Err(error) => crate::i18n::error_message(&error, app.language),
+                        };
+                    }
+                }
+            }
+            KeyCode::Char('e' | '+') if app.page == 6 => {
+                let action = if key.code == KeyCode::Char('e') {
+                    SettingsAction::Language
+                } else {
+                    SettingsAction::Timeout(5)
+                };
+                match change_settings(&paths, &mut app, action) {
+                    Ok(message) => app.message = message,
+                    Err(error) => app.message = crate::i18n::error_message(&error, app.language),
+                }
+            }
+            KeyCode::Char('-') if app.page == 6 => {
+                match change_settings(&paths, &mut app, SettingsAction::Timeout(-5)) {
+                    Ok(message) => app.message = message,
+                    Err(error) => app.message = crate::i18n::error_message(&error, app.language),
+                }
+            }
+            KeyCode::Char(']') if app.page == 6 => {
+                match change_settings(&paths, &mut app, SettingsAction::MaxOutput(4096)) {
+                    Ok(message) => app.message = message,
+                    Err(error) => app.message = crate::i18n::error_message(&error, app.language),
+                }
+            }
+            KeyCode::Char('[') if app.page == 6 => {
+                match change_settings(&paths, &mut app, SettingsAction::MaxOutput(-4096)) {
+                    Ok(message) => app.message = message,
+                    Err(error) => app.message = crate::i18n::error_message(&error, app.language),
+                }
+            }
+            KeyCode::Enter if app.page == 6 => {
+                match change_settings(&paths, &mut app, SettingsAction::Language) {
+                    Ok(message) => app.message = message,
+                    Err(error) => app.message = crate::i18n::error_message(&error, app.language),
                 }
             }
             KeyCode::Char('/') => app.searching = app.page == 0,
@@ -179,7 +343,7 @@ async fn run_loop(
             }
             KeyCode::Enter if app.page == 0 => {
                 if let Ok(config) = &config {
-                    let aliases = filtered_hosts(config, &app.search);
+                    let aliases = filtered_hosts(config, app.search.value());
                     if let Some(alias) = aliases.get(app.selected).copied() {
                         interactive_ssh(&mut terminal, &paths, config, alias, &mut app).await?;
                     }
@@ -213,10 +377,15 @@ async fn unlock_prompt(
     app: &mut App,
 ) -> Result<()> {
     suspend(terminal)?;
-    let password = rpassword::prompt_password(app.language.text("Master password: ", "主密码："));
+    let password = crate::masked_prompt::prompt(app.language.text("Master password: ", "主密码："));
     resume(terminal)?;
     match password {
-        Ok(password) => match client.call(RpcRequest::Unlock { password }).await {
+        Ok(password) => match client
+            .call(RpcRequest::Unlock {
+                password: password.to_string(),
+            })
+            .await
+        {
             Ok(_) => app.message = app.language.text("Vault unlocked", "Vault 已解锁").into(),
             Err(error) => app.message = error.message,
         },
@@ -253,13 +422,22 @@ async fn interactive_ssh(
 
 pub(crate) fn suspend(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode().map_err(|e| AppError::io("suspend TUI", e))?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).map_err(|e| AppError::io("leave TUI", e))
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )
+    .map_err(|e| AppError::io("leave TUI", e))
 }
 
 pub(crate) fn resume(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     enable_raw_mode().map_err(|e| AppError::io("resume TUI", e))?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)
-        .map_err(|e| AppError::io("restore TUI", e))?;
+    execute!(
+        terminal.backend_mut(),
+        EnableBracketedPaste,
+        EnterAlternateScreen
+    )
+    .map_err(|e| AppError::io("restore TUI", e))?;
     terminal.clear().map_err(|e| AppError::io("clear TUI", e))
 }
 
@@ -396,6 +574,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
                             "安全级别：L1（同用户 Broker，不是 L2 隔离）",
                         )
                         .into(),
+                        config.settings.language.text(
+                            "e/Enter: switch language · +/-: timeout · [/]: output limit (changes save immediately)",
+                            "e/Enter 切换语言 · +/- 调整超时 · [/] 调整输出上限（更改后立即保存）",
+                        )
+                        .into(),
                     ]
                 })
                 .unwrap_or_else(|| {
@@ -418,10 +601,17 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         Paragraph::new(format!(
             "{}\n{}",
             app.message,
-            app.language.text(
-                "q quit │ Tab pages │ ↑↓ select │ a add host │ / search │ Enter SSH │ u unlock │ l lock",
-                "q 退出 │ Tab 页面 │ ↑↓ 选择 │ a 添加主机 │ / 搜索 │ Enter SSH │ u 解锁 │ l 锁定",
-            )
+            if app.page == 6 {
+                app.language.text(
+                    "Settings: e/Enter language · +/- timeout · [/] max output (atomic save, config backed up)",
+                    "设置：e/Enter 语言 · +/- 超时 · [/] 输出上限（原子保存并备份配置）",
+                )
+            } else {
+                app.language.text(
+                    "1-7/Tab pages │ ↑↓ select │ a add │ e edit │ t test │ / search │ Enter SSH │ u unlock │ l lock │ q quit",
+                    "1-7/Tab 页面 │ ↑↓ 选择 │ a 添加 │ e 编辑 │ t 测试 │ / 搜索 │ Enter SSH │ u 解锁 │ l 锁定 │ q 退出",
+                )
+            }
         ))
         .block(Block::default().borders(Borders::ALL)),
         columns[2],
@@ -450,7 +640,7 @@ fn draw_hosts(
         );
         return;
     };
-    let aliases = filtered_hosts(config, &app.search);
+    let aliases = filtered_hosts(config, app.search.value());
     let rows = aliases.iter().filter_map(|alias| {
         config.hosts.get(*alias).map(|host| {
             let agent = if host.auth == crate::config::AuthMode::ExternalAgent {
@@ -489,6 +679,17 @@ fn draw_hosts(
             ])
         })
     });
+    let filter_prefix = format!(
+        "{} — {}: ",
+        app.language.text("Hosts", "主机"),
+        app.language.text("filter", "筛选")
+    );
+    let (filter, filter_cursor) = if app.searching {
+        app.search
+            .window(area.width.saturating_sub(12).max(1) as usize, None)
+    } else {
+        (app.search.value().to_string(), 0)
+    };
     let table = Table::new(
         rows,
         [
@@ -515,12 +716,11 @@ fn draw_hosts(
                 .add_modifier(Modifier::BOLD)
         }),
     )
-    .block(Block::default().borders(Borders::ALL).title(format!(
-        "{} — {}: {}",
-        app.language.text("Hosts", "主机"),
-        app.language.text("filter", "筛选"),
-        app.search
-    )))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("{filter_prefix}{filter}")),
+    )
     .row_highlight_style(if app.no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
@@ -530,6 +730,14 @@ fn draw_hosts(
     let mut state = TableState::default()
         .with_selected(Some(app.selected.min(aliases.len().saturating_sub(1))));
     frame.render_stateful_widget(table, area, &mut state);
+    if app.searching {
+        let x = (area.x
+            + 1
+            + crate::text_input::display_width(&filter_prefix) as u16
+            + filter_cursor as u16)
+            .min(area.x + area.width.saturating_sub(2));
+        frame.set_cursor_position((x, area.y));
+    }
 }
 
 fn draw_lines(
@@ -547,4 +755,41 @@ fn draw_lines(
         List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_changes_are_bounded_persistent_and_preserve_hosts() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        let mut config =
+            Config::initialize(&paths.config).unwrap_or_else(|error| panic!("config: {error}"));
+        config.hosts.insert(
+            "oracle".into(),
+            crate::config::Host {
+                hostname: Some("192.0.2.50".into()),
+                ..crate::config::Host::default()
+            },
+        );
+        config
+            .save(&paths.config)
+            .unwrap_or_else(|error| panic!("save: {error}"));
+        let mut app = App::default();
+        change_settings(&paths, &mut app, SettingsAction::Language)
+            .unwrap_or_else(|error| panic!("language: {error}"));
+        change_settings(&paths, &mut app, SettingsAction::Timeout(-20))
+            .unwrap_or_else(|error| panic!("timeout floor: {error}"));
+        change_settings(&paths, &mut app, SettingsAction::MaxOutput(4096))
+            .unwrap_or_else(|error| panic!("max output: {error}"));
+        let restored = Config::load(&paths.config).unwrap_or_else(|error| panic!("load: {error}"));
+        assert_eq!(restored.settings.language, crate::config::UiLanguage::ZhCn);
+        assert_eq!(restored.settings.timeout_seconds, 10);
+        assert_eq!(restored.settings.max_output, 65_536 + 4096);
+        assert!(restored.hosts.contains_key("oracle"));
+        assert_eq!(app.language, restored.settings.language);
+    }
 }

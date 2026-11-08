@@ -7,7 +7,6 @@ use crate::config::{
 use crate::error::{AppError, ErrorCode, Result};
 use crate::model::{OperationReport, OperationStatus, StatusReport};
 use crate::transfer;
-use crate::transport::Transport as _;
 use crate::transport::openssh::OpensshTransport;
 use crate::vault::VaultSession;
 use clap::{Args, Parser, Subcommand};
@@ -58,7 +57,9 @@ enum Action {
     Unlock,
     Lock,
     Tui,
-    Doctor,
+    Doctor {
+        target: Option<String>,
+    },
     Hosts,
     #[command(subcommand)]
     Host(HostAction),
@@ -92,6 +93,9 @@ enum Action {
 #[derive(Debug, Subcommand)]
 enum HostAction {
     Add(Box<HostAdd>),
+    Edit {
+        alias: String,
+    },
     Remove {
         alias: String,
         #[arg(long)]
@@ -280,6 +284,7 @@ async fn run_askpass(arguments: Vec<std::ffi::OsString>) -> Result<()> {
 pub async fn main_entry() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
+    let config_path = cli.config.clone();
     match dispatch(cli).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
@@ -287,15 +292,29 @@ pub async fn main_entry() -> ExitCode {
                 let value = serde_json::json!({"error": error.detail()});
                 println!("{}", serde_json::to_string(&value).unwrap_or_else(|_| "{\"error\":{\"code\":\"internal_error\",\"message\":\"JSON serialization failed\"}}".into()));
             } else {
-                eprintln!("remxo [{:?}]: {}", error.code, error.message);
+                let language = AppPaths::new(config_path)
+                    .map(|paths| human_language(&paths))
+                    .unwrap_or_default();
+                eprintln!(
+                    "remxo [{:?}]: {}",
+                    error.code,
+                    crate::i18n::error_message(&error, language)
+                );
             }
             ExitCode::from(2)
         }
     }
 }
 
+fn human_language(paths: &AppPaths) -> crate::config::UiLanguage {
+    Config::load(&paths.config)
+        .map(|config| config.settings.language)
+        .unwrap_or_default()
+}
+
 async fn dispatch(mut cli: Cli) -> Result<u8> {
     let paths = AppPaths::new(cli.config.clone())?;
+    let language = human_language(&paths);
     match cli.action.take() {
         Some(Action::Init { lang }) => {
             if paths.vault().exists() {
@@ -365,24 +384,43 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             emit(
                 &status,
                 cli.json,
-                &format!(
-                    "Vault: {}\nBroker: {}\nHosts: {}",
-                    if status.vault_locked {
-                        "locked"
-                    } else {
-                        "unlocked"
-                    },
-                    if status.broker_running {
-                        "running"
-                    } else {
-                        "stopped"
-                    },
-                    status.hosts
-                ),
+                &match language {
+                    crate::config::UiLanguage::ZhCn => format!(
+                        "Vault：{}\nBroker：{}\n主机：{}",
+                        if status.vault_locked {
+                            "已锁定"
+                        } else {
+                            "已解锁"
+                        },
+                        if status.broker_running {
+                            "运行中"
+                        } else {
+                            "已停止"
+                        },
+                        status.hosts
+                    ),
+                    crate::config::UiLanguage::En => format!(
+                        "Vault: {}\nBroker: {}\nHosts: {}",
+                        if status.vault_locked {
+                            "locked"
+                        } else {
+                            "unlocked"
+                        },
+                        if status.broker_running {
+                            "running"
+                        } else {
+                            "stopped"
+                        },
+                        status.hosts
+                    ),
+                },
             )?;
         }
         Some(Action::Unlock) => {
-            let password = hidden_password("Master password: ")?;
+            let language = Config::load(&paths.config)
+                .map(|config| config.settings.language)
+                .unwrap_or_default();
+            let password = hidden_password(language.text("Master password: ", "主密码："))?;
             let client = connected_client(paths).await?;
             expect_ack(
                 client
@@ -394,7 +432,10 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             emit(
                 &serde_json::json!({"vault_locked": false}),
                 cli.json,
-                "Vault unlocked in the local Broker.",
+                language.text(
+                    "Vault unlocked in the local Broker.",
+                    "本地 Broker 中的 Vault 已解锁。",
+                ),
             )?;
         }
         Some(Action::Lock) => {
@@ -405,7 +446,7 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             emit(
                 &serde_json::json!({"vault_locked": true}),
                 cli.json,
-                "Vault locked.",
+                language.text("Vault locked.", "Vault 已锁定。"),
             )?;
         }
         Some(Action::Hosts) => {
@@ -413,24 +454,50 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             if cli.json {
                 emit(&config.hosts, true, "")?;
             } else {
-                println!("ALIAS\tNUMBER\tTRANSPORT\tENVIRONMENT\tAUTH\tSECURITY");
+                println!(
+                    "{}",
+                    language.text(
+                        "ALIAS\tNUMBER\tTRANSPORT\tENVIRONMENT\tAUTH\tSECURITY",
+                        "别名\t编号\t传输\t环境\t认证\t安全性",
+                    )
+                );
                 for (alias, host) in config.hosts {
+                    let auth = match host.auth {
+                        AuthMode::OpensshConfig => language.text("OpenSSH config", "OpenSSH 配置"),
+                        AuthMode::ExternalAgent => language.text("External agent", "外部 Agent"),
+                        AuthMode::VaultPassword => language.text("Vault password", "Vault 密码"),
+                        AuthMode::VaultKey => language.text("Vault private key", "Vault 私钥"),
+                    };
                     println!(
-                        "{alias}\t{}\t{:?}\t{}\t{:?}\t{}",
+                        "{alias}\t{}\t{:?}\t{}\t{}\t{}",
                         host.number.map(|n| n.to_string()).unwrap_or_default(),
                         host.transport,
                         host.environment,
-                        host.auth,
+                        auth,
                         if host.transport == TransportKind::Telnet {
-                            "INSECURE"
+                            language.text("INSECURE", "不安全")
                         } else {
-                            "encrypted"
+                            language.text("encrypted", "加密")
                         }
                     );
                 }
             }
         }
         Some(Action::Host(HostAction::Add(add))) => host_add(&paths, &cli, *add).await?,
+        Some(Action::Host(HostAction::Edit { alias })) => {
+            if cli.json {
+                return Err(AppError::invalid_argument(
+                    "interactive host editing cannot be combined with --json",
+                ));
+            }
+            require_tui_terminal()?;
+            let result = crate::tui_wizard::run_edit(&paths, alias, cli.no_color).await?;
+            emit(
+                &serde_json::json!({"edited": result.saved_alias, "message": result.message}),
+                false,
+                &result.message,
+            )?;
+        }
         Some(Action::Host(HostAction::Remove { alias, yes })) => {
             if !yes {
                 return Err(AppError::invalid_argument(
@@ -445,7 +512,10 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             emit(
                 &serde_json::json!({"removed": alias}),
                 cli.json,
-                "Host removed (previous config backed up).",
+                language.text(
+                    "Host removed (previous config backed up).",
+                    "主机已删除（原配置已备份）。",
+                ),
             )?;
         }
         Some(Action::Vault(VaultAction::ChangePassword)) => {
@@ -634,7 +704,9 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             .await?
             .clamp(0, 255) as u8);
         }
-        Some(Action::Doctor) => doctor(&paths, cli.json)?,
+        Some(Action::Doctor { target }) => {
+            return doctor(&paths, cli.json, target, language).await;
+        }
         Some(Action::Tui) => {
             require_tui_terminal()?;
             crate::tui::run_with_options(paths, cli.no_color).await?;
@@ -762,8 +834,17 @@ async fn external(paths: AppPaths, cli: &Cli, values: Vec<String>) -> Result<u8>
         }
         let config = Config::load(&paths.config)?;
         let target = resolve_target(&config, &target)?;
+        let context = crate::transport::AuthenticationContext::registered(
+            paths.clone(),
+            &target.alias,
+            &target.host,
+        );
+        if context.is_some() {
+            connected_client(paths).await?;
+        }
         return Ok(OpensshTransport::default()
-            .interactive(&target.host)?
+            .interactive_authenticated(&target.host, context.as_ref())
+            .await?
             .clamp(0, 255) as u8);
     }
     let mut sudo = cli.sudo;
@@ -782,13 +863,14 @@ async fn external(paths: AppPaths, cli: &Cli, values: Vec<String>) -> Result<u8>
     };
     let mut spec = execute_spec(cli, target, command, profile, profile_args);
     spec.sudo = sudo;
+    let language = human_language(&paths);
     let client = connected_client(paths).await?;
     let report = match client.call(RpcRequest::Execute { spec }).await? {
         RpcPayload::Report(report) => report,
         _ => return Err(AppError::internal("unexpected execute response")),
     };
     let success = report.status == OperationStatus::Success && report.remote_exit_code == Some(0);
-    print_operation(&report, cli.json)?;
+    print_operation(&report, cli.json, language)?;
     Ok(if success { 0 } else { 1 })
 }
 
@@ -977,6 +1059,7 @@ async fn transfer_command(
         timeout_seconds: cli.timeout,
         max_output: cli.max_output,
     };
+    let language = human_language(&paths);
     let client = connected_client(paths).await?;
     let report = match client.call(RpcRequest::Transfer { spec }).await? {
         RpcPayload::Report(report) => report,
@@ -984,7 +1067,7 @@ async fn transfer_command(
     };
     let success = report.status == OperationStatus::Success && report.remote_exit_code == Some(0);
     if cli.json || !success {
-        print_operation(&report, cli.json)?;
+        print_operation(&report, cli.json, language)?;
     } else {
         let outcome: transfer::TransferOutcome = serde_json::from_str(&report.stdout)
             .map_err(|e| AppError::internal(format!("invalid transfer outcome: {e}")))?;
@@ -998,7 +1081,12 @@ async fn transfer_command(
     Ok(if success { 0 } else { 1 })
 }
 
-fn doctor(paths: &AppPaths, json: bool) -> Result<()> {
+async fn doctor(
+    paths: &AppPaths,
+    json: bool,
+    target: Option<String>,
+    language: crate::config::UiLanguage,
+) -> Result<u8> {
     let config = Config::load(&paths.config)?;
     let ssh = std::env::var_os("REMXO_SSH").unwrap_or_else(|| "ssh".into());
     let output = std::process::Command::new(ssh).arg("-V").output();
@@ -1018,18 +1106,59 @@ fn doctor(paths: &AppPaths, json: bool) -> Result<()> {
         }
         Err(_) => (false, String::new()),
     };
-    let report = serde_json::json!({"config_valid": true, "hosts": config.hosts.len(), "vault_present": paths.vault().exists(), "ssh_available": available, "ssh_version": version, "host_key_check_disabled_by_remxo": false, "security_level": "L1"});
-    emit(
-        &report,
-        json,
-        &format!(
+    let mut report = serde_json::json!({"config_valid": true, "hosts": config.hosts.len(), "vault_present": paths.vault().exists(), "ssh_available": available, "ssh_version": version, "host_key_check_disabled_by_remxo": false, "security_level": "L1"});
+    let mut human = match language {
+        crate::config::UiLanguage::ZhCn => format!(
+            "配置有效，共 {} 台主机。OpenSSH 可用：{available}。Remxo 不会关闭主机密钥检查。",
+            config.hosts.len()
+        ),
+        crate::config::UiLanguage::En => format!(
             "Config valid; {} host(s). OpenSSH available: {available}. Remxo never disables host key checks.",
             config.hosts.len()
         ),
-    )
+    };
+    let mut exit_code = 0;
+    if let Some(target) = target {
+        let resolved = resolve_target(&config, &target)?;
+        match crate::tui_wizard::test_registered_connection(
+            paths,
+            &resolved.alias,
+            &resolved.host,
+            language,
+        )
+        .await
+        {
+            Ok((message, passed)) => {
+                report["connection_test"] = serde_json::json!({
+                    "host": resolved.alias,
+                    "passed": passed,
+                    "message": message,
+                });
+                human.push_str(&format!("\n{message}"));
+                exit_code = if passed { 0 } else { 1 };
+            }
+            Err(error) => {
+                let message = crate::i18n::error_message(&error, language);
+                report["connection_test"] = serde_json::json!({
+                    "host": resolved.alias,
+                    "passed": false,
+                    "error": error.detail(),
+                    "message": message,
+                });
+                human.push_str(&format!("\n{message}"));
+                exit_code = 1;
+            }
+        }
+    }
+    emit(&report, json, &human)?;
+    Ok(exit_code)
 }
 
-fn print_operation(report: &OperationReport, json: bool) -> Result<()> {
+fn print_operation(
+    report: &OperationReport,
+    json: bool,
+    language: crate::config::UiLanguage,
+) -> Result<()> {
     if json {
         println!(
             "{}",
@@ -1040,9 +1169,21 @@ fn print_operation(report: &OperationReport, json: bool) -> Result<()> {
         print!("{}", report.stdout);
         eprint!("{}", report.stderr);
         if let Some(error) = &report.error {
-            eprintln!("remxo [{:?}]: {}", error.code, error.message);
+            let display = AppError::new(error.code, error.message.clone());
+            eprintln!(
+                "remxo [{:?}]: {}",
+                error.code,
+                crate::i18n::error_message(&display, language)
+            );
             if let Some(id) = &error.approval_id {
-                eprintln!("A human may approve with: remxo approval approve {id}");
+                match language {
+                    crate::config::UiLanguage::ZhCn => {
+                        eprintln!("请人工审查后运行：remxo approval approve {id}");
+                    }
+                    crate::config::UiLanguage::En => {
+                        eprintln!("A human may approve with: remxo approval approve {id}");
+                    }
+                }
             }
         }
         std::io::stdout()
@@ -1108,15 +1249,19 @@ fn choose_language(request: Option<String>, json: bool) -> Result<crate::config:
         Some(language) => crate::config::UiLanguage::from_arg(&language),
         None if json || !std::io::stdin().is_terminal() => Ok(crate::config::UiLanguage::En),
         None => {
-            let input = prompt_text("Language / UI 语言 [English / zh-CN]: ")?;
-            let input = input.to_string_lossy();
-            let input = input.trim();
-            if input.is_empty() {
-                Ok(crate::config::UiLanguage::En)
-            } else {
-                crate::config::UiLanguage::from_arg(input)
-            }
+            let input = prompt_text(
+                "Language / UI 语言:\n  1. English\n  2. 简体中文\nSelect / 请选择 [1/2] (default 1): ",
+            )?;
+            parse_language_choice(input.to_string_lossy().trim())
         }
+    }
+}
+
+fn parse_language_choice(input: &str) -> Result<crate::config::UiLanguage> {
+    match input.trim() {
+        "" | "1" => Ok(crate::config::UiLanguage::En),
+        "2" => Ok(crate::config::UiLanguage::ZhCn),
+        _ => crate::config::UiLanguage::from_arg(input),
     }
 }
 
@@ -1200,10 +1345,7 @@ fn prompt_text(prompt: &str) -> Result<PathBuf> {
 }
 
 fn hidden_password(prompt: &str) -> Result<Zeroizing<String>> {
-    require_terminal()?;
-    rpassword::prompt_password(prompt)
-        .map(Zeroizing::new)
-        .map_err(|e| AppError::io("read hidden password", e))
+    crate::masked_prompt::prompt(prompt)
 }
 
 fn hidden_password_confirmed(prompt: &str) -> Result<Zeroizing<String>> {
@@ -1349,6 +1491,27 @@ fn format_tunnels(items: &[crate::tunnel::TunnelSummary]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interactive_language_accepts_numbers_names_and_empty_default() {
+        assert_eq!(
+            parse_language_choice("").ok(),
+            Some(crate::config::UiLanguage::En)
+        );
+        assert_eq!(
+            parse_language_choice("1").ok(),
+            Some(crate::config::UiLanguage::En)
+        );
+        assert_eq!(
+            parse_language_choice("2").ok(),
+            Some(crate::config::UiLanguage::ZhCn)
+        );
+        assert_eq!(
+            parse_language_choice("zh-CN").ok(),
+            Some(crate::config::UiLanguage::ZhCn)
+        );
+        assert!(parse_language_choice("3").is_err());
+    }
+
     #[test]
     fn everything_after_target_is_preserved_as_remote_arguments() {
         let cli = Cli::try_parse_from(["remxo", "--json", "prod", "ls", "-l", "--help"])

@@ -80,7 +80,7 @@ fn default_port() -> u16 {
     22
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Host {
     #[serde(default, skip_serializing_if = "Option::is_none")]

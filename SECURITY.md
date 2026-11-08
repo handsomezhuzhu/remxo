@@ -54,15 +54,17 @@ Broker RPC 的 `SecretForAuth` 可以有单个 `Secret { kind, value }` 响应�
 
 Vault 私钥仅在 OpenSSH 需要时通过单 Secret RPC 取出，并写入数据目录 `runtime` 下的受管临时文件。guard 持续至 exec/task/交互进程结束或 tunnel guard 销毁，正常 drop 删除文件。Unix 上临时文件设置为 `0600`；当前非 Unix 文件限制 helper 并未建立等价 Windows ACL，Windows 原生权限与真实 Vault 认证尚未验证。强制终止、崩溃、文件系统行为或权限错误可能阻止清理；普通文件删除不是安全擦除保证。
 
-密码/口令明文存在于 Broker/客户端相关进程内存和同用户 RPC 数据中，并经过 ASKPASS stdout；私钥还会短时存在于明文临时文件中。零化、受限文件名和短生命周期只能降低意外暴露，不能抵抗同用户读取内存、替换可执行文件、截获 RPC/stdout 或复制临时文件。
+密码/口令明文存在于 Broker/客户端相关进程内存和同用户 RPC 数据中，并经过 ASKPASS stdout；私钥还会短时存在于明文临时文件中。交互输入只显示与用户输入数量对应的 `*`，不显示秘密内容，但掩码数量和终端本身不是防窥探保证。零化、受限文件名和短生命周期只能降低意外暴露，不能抵抗同用户读取内存、替换可执行文件、截获 RPC/stdout 或复制临时文件。
 
 ### TUI 向导保存顺序
 
-向导的密码/口令字段只显示隐藏状态；私钥路径作为可见非秘密字段输入。Test 和 Save 都先导入 Vault 凭据，未保存 test 使用 pending Host。Test 失败、保存前失败或 Esc 不写 Host，但已经导入的秘密仍加密留在 Vault；这不是 Vault + Host 的全事务。直接 Save 在 SSH 凭据成功后写 Host，不要求先成功 Test。sudo 在 Host 保存后独立配置，失败只产生后续修复提示，不回滚 Host。
+向导的密码/口令字段仅显示 `*` 掩码和可编辑光标；终端 ECHO 关闭，秘密值不显示。私钥路径作为可见非秘密字段输入。新建 Host 的 Test 和 Save 都先导入 Vault 凭据，未保存 test 使用 pending Host。Test 失败、保存前失败或 Esc 不写 Host，但已经导入的秘密仍加密留在 Vault；这不是 Vault + Host 的全事务。直接 Save 在 SSH 凭据成功后写 Host，不要求先成功 Test。sudo 在 Host 保存后独立配置，失败只产生后续修复提示，不回滚 Host。
+
+编辑已有 Host 固定 alias，执行 expected-Host 防陈旧覆盖检查；非秘密修改沿用现有凭据。显式轮换使用新的版本化 credential stem，配置保存前不改写旧 Host 当前引用的秘密。旧凭据仍加密保留，不承诺跨配置/Vault 整体回滚或自动安全删除。保存并测试先保存编辑，再通过正式登记 Host 执行测试；已登记 alias 不使用 pending Host。测试失败不回滚已保存的配置。
 
 ### 初始化语言与配置恢复
 
-`settings.language` 严格持久化为 `en` 或 `zh-CN`，缺失的旧配置默认 `en`。`init --lang en|zh-CN` 显式选择；TTY 无参数时可选语言，JSON/非 TTY 不强制语言提示，但隐藏主密码仍要求 TTY。已有有效配置且 Vault 缺失时，恢复初始化保留原配置及语言，只创建缺失的 Locked Vault，不覆盖配置或已有 Vault。主 TUI/向导有中英界面，不据此宣称所有 CLI 错误已翻译或完成跨平台 UI 验证。
+`settings.language` 严格持久化为 `en` 或 `zh-CN`，缺失的旧配置默认 `en`。`init --lang en|zh-CN` 显式选择；TTY 无参数时可通过编号 `1`/`2` 或语言名称选择，空输入默认英文，JSON/非 TTY 不强制语言提示，但显示 `*` 掩码的主密码仍要求 TTY。已有有效配置且 Vault 缺失时，恢复初始化保留原配置及语言，只创建缺失的 Locked Vault，不覆盖配置或已有 Vault。`unlock` 的掩码提示与成功消息、主 TUI/向导使用已保存语言，不据此宣称所有 CLI 错误已翻译或完成跨平台 UI 验证。
 
 ## 明确不在 L1 保证内
 

@@ -8,7 +8,7 @@
 
 - Windows 原生 `cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets -- --test-threads=1` 和 `cargo build` 均通过；这只证明当前 Rust 检查与构建，不证明 Windows ACL 或真实 Vault 认证。
 - 隔离、无 Vault 注入的 Instabox `remxo-dev` 上，`python3 tests/run_all.py` 的 `checks/fmt`、`checks/clippy`、`checks/unit`、`checks/build`、fake、PTY、两个 real suite、sudo 和 cleanup 均为 PASSED，真实 suite 未跳过。
-- 5 个 PTY case 实际覆盖连续隐藏密码/备份流程、基础主机向导、交互中文初始化、Vault password 向导 Test→Save、Vault key 路径导入向导 Test→Save。真实 sshd 另行通过 Vault password/加密私钥 exec、Vault password put、Vault key get、严格 HostKey 负例与恢复、正常临时 key 清理及秘密扫描。fake 另验证真实 ASKPASS password 回环、错误提示拒绝和超时临时 key 清理。
+- 6 个 PTY case 实际覆盖连续掩码密码/备份流程、基础主机向导、光标编辑与主机编辑、交互中文数字语言选择与中文解锁、Vault password 向导 Test→Save、Vault key 路径导入向导 Test→Save。真实 sshd 另行通过 Vault password/加密私钥 exec、Vault password put、Vault key get、严格 HostKey 负例与恢复、正常临时 key 清理及秘密扫描。fake 另验证真实 ASKPASS password 回环、错误提示拒绝和超时临时 key 清理。
 - **Windows 原生 ACL/临时私钥权限和真实 ASKPASS 密码/私钥认证仍为 NOT_RUN**。非 Unix `store` 限制 helper 本身不会建立等价 Windows ACL；不能把 Unix `0600` 或本机 Rust 测试外推为 Windows 协议/权限结果。
 - Vault task/tunnel/TUI interactive SSH/SFTP、错误凭据矩阵、Test 失败/Esc 的残留凭据边界、启动失败清理和强制终止/崩溃清理仍未全部验证。结果不对应任何远端 GitHub CI 运行，不宣称跨平台、全部服务端或全认证操作矩阵通过。
 
@@ -84,7 +84,7 @@ REMXO_REQUIRE_REAL_SSH=1 REMXO_BIN="$PWD/target/debug/remxo" \
 - 子进程 stdin 写入/关闭失败会先 kill/wait 回收子进程再返回，防止在子进程仍可能使用临时 key 时提前释放认证 guard；新增独立 Unix 回归检查已实际通过。
 - `tests/cli_end_to_end.rs` 的 fake ssh fixture 调用真实 current-executable ASKPASS，检查 force/target、password prompt 成功与若干拒绝提示、argv/审计无测试秘密及无 `__askpass`；同一用例还覆盖 Vault key 在 transport timeout 后的受限临时文件清理。本次该 Rust suite 已实际通过，但它仍不是服务端密码/公钥兼容性证明。
 - 私钥导入拒绝非 key 文本且错误不回显内容、OpenSSH PEM marker；Unix 上拒绝 symlink、临时文件 `0600` 和正常 drop 删除；
-- 向导秘密字段只显示隐藏状态、中把控件和实际渲染缓冲区，不渲染测试秘密；
+- 向导秘密字段只显示 `*` 掩码、中把控件和实际渲染缓冲区，不渲染测试秘密；`text_input` 另验证中间插入、左右/Home/End、Delete/Backspace、Unicode 宽度、长路径窗口、控制字符拒绝及 masked/Debug 不泄密；
 - POSIX 参数与 cwd 注入检查、非 POSIX 拒绝、profile 参数；
 - 原始 argv、无本地 shell 拼接、外部认证 BatchMode、默认不弱化主机密钥检查；
 - Vault 初始锁定、等效重启锁定、错误主密码、DEK 不明文落盘、改密不换 DEK；
@@ -121,7 +121,7 @@ Linux Python `pty.fork` 自动完成隐藏提示，而不是通过 argv、stdin 
 - TUI 在 PTY 中启动并通过 q 退出；
 - 临时配置、Vault、备份和终端记录不含测试密码。
 
-当前基础流程与主机向导 fixture 显式使用 `init --lang en`；交互中文用例实际选择 `zh-CN`、匹配中文主密码/确认提示并检查配置语言。本次 5 个 PTY case 均实际通过。JSON/非 TTY 默认英文的单测/配置覆盖与 `config-only` 恢复保留语言的实现仍需和端到端覆盖区分，不能仅凭 GUI 标签宣称所有 CLI 已翻译。
+当前基础流程与主机向导 fixture 显式使用 `init --lang en`；交互中文用例通过编号 `2` 选择中文、匹配中文主密码/确认提示、检查配置语言与中文 unlock 文本，并断言出现 `*` 掩码。另有 `host edit` 的真实 PTY 用例在已有主机上通过 Home/Delete/End 修改地址，保存并复核，不需要重建主机。本次 6 个 PTY case 均实际通过。JSON/非 TTY 默认英文的单测/配置覆盖与 `config-only` 恢复保留语言的实现仍需和端到端覆盖区分，不能仅凭 GUI 标签宣称所有 CLI 已翻译。
 
 PTY transcript 仅做内存泄漏检查，不打印密码或大段终端内容；每条命令具有超时和独立子进程回收。新增 SSH 密码、私钥口令和 test-only key PEM 也必须加入 transcript、配置、Vault、审计和临时 runtime 的秘密扫描；路径是可见非秘密数据，不应误判为秘密值。
 
@@ -185,7 +185,8 @@ PTY transcript 仅做内存泄漏检查，不打印密码或大段终端内容�
 | Broker 认证上下文 | 已登记 Host 重解析和 kind 检查；普通 alias/编号目标；已保存 alias 的 pending 请求拒绝；未保存 wizard pending 只取预期记录 | 不打印 Broker token、Secret RPC 响应或秘密 fixture。 |
 | 私钥导入 | 支持的 OpenSSH/RSA/EC/PKCS#8 形状；非常规文件、symlink、超 1 MiB、非 ASCII/不支持 marker 拒绝；源文件不变 | 每种平台按其语义单独执行，Unix 的 symlink/权限结果不能代替 Windows。 |
 | 临时 key | exec/task、SCP、TUI interactive SSH、SFTP、tunnel 生命周期中仅传受限临时路径；正常结束后删除；启动失败路径也清理 | 崩溃/强杀残留只能作为明确限制验证，不得宣称保证清除或安全擦除。 |
-| PTY/i18n | `init --lang en|zh-CN`、TTY 空默认、JSON/非 TTY 不提出语言问题、旧配置 en、config-only 恢复保留语言；主 TUI/向导中控件 | 隐藏密码检查必须先等 ECHO=off；非交互 init 仍可能因需要隐藏主密码而失败，不能伪称完全自动化 init。 |
+| PTY/i18n | `init --lang en|zh-CN`、TTY 数字 `1`/`2` 与空默认、JSON/非 TTY 不提出语言问题、旧配置 en、config-only 恢复保留语言；主 TUI/向导中控件、中文 unlock 与其他用户侧消息 | 隐藏密码检查必须先等 ECHO=off；非交互 init 仍可能因需要掩码主密码而失败，不能伪称完全自动化 init。 |
+| PTY/editor | 可见光标、左右/Home/End、插入/Backspace/Delete、bracketed paste、成对引号私钥路径；`host edit` 非秘密配置更新、expected-Host 过期拒绝、保存后登记 Host 测试、版本化凭据 stem | 任何密码/口令只显示 `*`，内容不得进入 transcript、预览或日志；非秘密编辑不要求 Broker/秘密重输；凭据轮换失败、sudo 部分失败仍需逐项覆盖。 |
 | PTY/wizard | 隐藏 SSH 密码/口令、私钥路径导入；先导入再 pending test；失败/Esc 不保存 Host 但密文保留；直接 Save；sudo 独立后配置 | 将 SSH 密码/口令/test-only key 纳入 transcript/Vault/audit 泄漏扫描，结果不打印秘密。 |
 | 真实 Vault public key | 临时 sshd 只允许 publickey；本地生成 test-only（含加密）私钥，经 Vault 导入并解锁；ASKPASS 提供口令；exec/task/SCP、TUI interactive SSH/SFTP/tunnel 的真实连接 | 临时 known_hosts 严格；错误口令、缺失 key、错误 Host key 必须失败且不重试；不得使用用户 `~/.ssh`。 |
 | 真实 Vault password | 另一个隔离 sshd fixture 明确允许仅测试账号 password auth；隐藏导入登录密码并验证共享操作路径 | 密码仅在容器/临时环境生成，auth log/输出不泄露；错误密码最多一次提示，不回退其他身份。 |

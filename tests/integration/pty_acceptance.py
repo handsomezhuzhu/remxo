@@ -422,6 +422,8 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
                 (b"Confirm password: ", ORIGINAL_MASTER),
             ),
         )
+        if b"New master password: *" not in self.transcripts[-1]:
+            raise PhaseFailure("masked password feedback was not rendered", 1)
         self._invoke(
             "host add",
             self.original_config,
@@ -530,7 +532,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             self.original_config,
             ["init"],
             [
-                (b"Language / UI ", "zh-CN\n".encode("ascii"), False),
+                (b"Select / ", b"2\n", False),
                 ("新主密码：".encode("utf-8"), ORIGINAL_MASTER.encode("ascii") + b"\n"),
                 ("确认主密码：".encode("utf-8"), ORIGINAL_MASTER.encode("ascii") + b"\n"),
             ],
@@ -538,6 +540,14 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
         saved = self.original_config.read_bytes()
         if b"zh-CN" not in saved:
             raise PhaseFailure("Chinese language was not persisted", 1)
+        self._invoke(
+            "localized Chinese unlock",
+            self.original_config,
+            ["unlock"],
+            self._password_replies(("主密码：".encode("utf-8"), ORIGINAL_MASTER)),
+        )
+        if "本地 Broker 中的 Vault 已解锁。".encode("utf-8") not in self.transcripts[-1]:
+            raise PhaseFailure("Chinese unlock output was not localized", 1)
         if ORIGINAL_MASTER.encode("ascii") in saved:
             raise PhaseFailure("master password entered configuration", 1)
         for transcript in self.transcripts:
@@ -581,8 +591,61 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             raise PhaseFailure("wizard did not save the host", 1)
         if "example.invalid" not in saved:
             raise PhaseFailure("wizard did not preserve its address", 1)
+        doctor = PtyCommand(
+            self.binary,
+            self.original_config,
+            ["doctor", "styled"],
+            environment,
+            self.root,
+            "doctor saved host",
+            [],
+        ).run()
+        self.transcripts.append(doctor.output)
+        if b"Connection test passed" not in doctor.output:
+            raise PhaseFailure("doctor did not test the registered host", 1)
         if any(ORIGINAL_MASTER.encode("ascii") in transcript for transcript in self.transcripts):
             raise PhaseFailure("wizard leaked master password", 1)
+    def test_host_edit_preserves_form_state_and_supports_cursor_editing(self) -> None:
+        self._invoke(
+            "init for cursor-based host edit",
+            self.original_config,
+            ["init", "--lang", "en"],
+            self._password_replies(
+                (b"New master password: ", ORIGINAL_MASTER),
+                (b"Confirm password: ", ORIGINAL_MASTER),
+            ),
+        )
+        self._invoke(
+            "host add for cursor-based edit",
+            self.original_config,
+            [
+                "host", "add", "styled", "--ssh-alias", "fake-test", "--approval", "never",
+            ],
+        )
+        keys = (
+            b"\x1b[B\x1b[B"
+            + b"\x1b[H\x1b[3~\x1b[F.new"
+            + b"\x1b[B" * 14
+            + b"\r"
+        )
+        result = PtyCommand(
+            self.binary,
+            self.original_config,
+            ["host", "edit", "styled"],
+            self.environment,
+            self.root,
+            "cursor-based host edit",
+            [(b"styled", keys)],
+        ).run()
+        self.transcripts.append(result.output)
+        saved = self.original_config.read_text(encoding="utf-8")
+        if "ake-test.new" not in saved or "fake-test" in saved:
+            raise PhaseFailure("host edit did not apply cursor insertion/deletion", 1)
+        for transcript in self.transcripts:
+            for password in TEST_PASSWORDS:
+                if password.encode("ascii") in transcript:
+                    raise PhaseFailure("host edit leaked hidden input", 1)
+
     def test_vault_password_wizard_can_test_then_save_without_leaking(self) -> None:
         self._invoke(
             "init for Vault password wizard",

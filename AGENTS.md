@@ -36,9 +36,9 @@
 - 私钥导入仅接受常规文件、拒绝 symlink，限制 1 MiB，支持 OpenSSH/RSA/EC/PKCS#8 PEM 形状；marker 校验不冒充真实认证。私钥仅以受 guard 管理的受限临时文件交给 OpenSSH，并统一由 `prepare_authentication` 覆盖 exec/task、TUI interactive SSH、SCP/SFTP 和 tunnel；正常结束清理，不承诺崩溃清理或安全擦除。
 - exec/task/传输/隧道共享认证准备时，必须保留临时 key 至子进程/隧道生命周期结束。Windows 原生 ACL 与真实认证未验证前，不得把 Unix `0600` 或 Linux 结果写成跨平台通过。
 - 配置/Vault/备份 schema 保持严格校验；新字段必须考虑迁移、备份范围、秘密与权限。新密码在写入任何配置或 Vault 前验证；初始化允许仅恢复“有效配置存在但 Vault 缺失”的半初始化状态，不能覆盖已有配置或 Vault。
-- `settings.language` 仅 `en|zh-CN`，旧配置默认 `en`。支持 `init --lang en|zh-CN`；TTY 无参数可选语言，JSON/非 TTY 不强制语言提示但隐藏主密码仍需要 TTY。恢复已有有效配置必须保留其语言；主 TUI/向导维护中英标签，不借此宣称所有 CLI 已翻译。
-- 主机注册必须同时服务 CLI 和 TUI 表单并保持共享验证与原子保存。交互式向导不在非 TTY / `--json` 下启动；密码/口令不进入表单预览，私钥路径是可见非秘密字段且不保存到 Host；`--no-color` 与环境变量 `NO_COLOR` 默认关闭套色。
-- wizard Test/Save 都先导入 Vault SSH 凭据；Test 失败或 Esc 不保存 Host，但已导入秘密仍以密文留 Vault，不得宣称全事务或自动回滚。直接 Save 在凭据成功后写 Host，不要求预先成功 Test；sudo 在 Host 保存后另配，失败不回滚 Host。
+- `settings.language` 仅 `en|zh-CN`，旧配置默认 `en`。支持 `init --lang en|zh-CN`；TTY 无参数可用编号 `1`/`2` 或语言名称选择，空输入默认英文，JSON/非 TTY 不强制语言提示但隐藏主密码仍需要 TTY。恢复已有有效配置必须保留其语言；`unlock` 的掩码提示与成功消息、主 TUI/向导维护中英标签，不借此宣称所有 CLI 已翻译。
+- 主机注册必须同时服务 CLI 和 TUI 表单并保持共享验证与原子保存。交互式向导不在非 TTY / `--json` 下启动；密码/口令不进入表单预览，私钥路径是可见非秘密字段且不保存到 Host；`--no-color` 与环境变量 `NO_COLOR` 默认关闭套色。共享 `text_input` 维护真实光标、Unicode 宽度和有界粘贴；秘密提示保持终端 ECHO 关闭，仅本地显示 `*` 掩码，秘密值、ASKPASS stdout、Secret RPC 不得进入终端记录、审计或测试输出。
+- wizard Test/Save 都先导入 Vault SSH 凭据；Test 失败或 Esc 不保存 Host，但已导入秘密仍以密文留 Vault，不得宣称全事务或自动回滚。直接 Save 在凭据成功后写 Host，不要求预先成功 Test；sudo 在 Host 保存后另配，失败不回滚 Host。已有 Host 编辑固定 alias、执行 expected-Host 检查；非秘密编辑保留原凭据，显式轮换用新版 credential stem，保存并测试先保存再用登记 Host 测试，已登记 alias 不得改为 pending 测试。旧凭据保留，不宣称跨配置/Vault 回滚或自动安全擦除。
 - 安全文档描述了 Broker、Vault、认证 Secret 交接、传输、任务、备份和 TUI；改变这些行为时同步更新 README（英文及完整等价 `README.zh-CN.md`）、SECURITY、THREAT_MODEL、ARCHITECTURE、TESTING 及本文件的适用部分。
 - 默认测试使用 fake ssh/scp 和临时数据目录；禁止真实凭据、用户 `~/.ssh`、生产服务器或虚构验证结果。私钥/密码 fixture 只能显式 test-only，失败日志不得输出 Secret/PEM。
 - `.github/workflows/` 定义原生和 `runs-on: instabox-medium` 的 GitHub CI；改变需要的权限、资源或运行方式时同步 TESTING.md。最多 3 个并发。`scripts/test/instabox-run.sh` 只用于官方 `instabox run` 开发期测试，不是 Actions backend，不用于 push 后 CI。
