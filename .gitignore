@@ -2,6 +2,7 @@
 /.npm-cache
 /.cargo-home
 /.ci-tools
+/plan
 __pycache__/
 *.pyc
 *.rxb
