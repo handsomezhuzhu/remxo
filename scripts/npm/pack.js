@@ -83,6 +83,9 @@ function stageMain(directory, version) {
   for (const name of ['bin', 'lib']) {
     fs.cpSync(path.join(NPM_DIR, name), path.join(directory, name), { recursive: true });
   }
+  // npm renders this file on the package page. Copying it explicitly keeps the
+  // staged package self-contained instead of relying on the repository root.
+  fs.copyFileSync(path.join(NPM_DIR, 'README.md'), path.join(directory, 'README.md'));
 }
 
 function stageCore(directory, platform, artifact, version, options = {}) {
@@ -95,6 +98,11 @@ function stageCore(directory, platform, artifact, version, options = {}) {
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.copyFileSync(source, destination);
   fs.chmodSync(destination, 0o755);
+  // Each platform package documents its own platform constraints.
+  fs.copyFileSync(
+    path.join(NPM_DIR, 'packages', platform, 'README.md'),
+    path.join(directory, 'README.md'),
+  );
   return destination;
 }
 

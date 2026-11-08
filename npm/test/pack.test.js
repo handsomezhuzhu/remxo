@@ -113,6 +113,30 @@ test('core staging places the native artifact in the Rust target vendor path', (
   ));
   assert.equal(fs.readFileSync(staged, 'utf8'), 'small test fixture');
   assert.equal(JSON.parse(fs.readFileSync(path.join(destination, 'package.json'))).version, '2.0.0');
+  const coreReadme = path.join(__dirname, '..', 'packages', 'win32-x64', 'README.md');
+  assert.equal(
+    fs.readFileSync(path.join(destination, 'README.md'), 'utf8'),
+    fs.readFileSync(coreReadme, 'utf8'),
+    'core package must ship its own README',
+  );
+});
+
+test('every npm package ships a non-trivial README', () => {
+  const sources = [
+    path.join(__dirname, '..', 'README.md'),
+    ...Object.keys(TARGETS).map((platform) => path.join(__dirname, '..', 'packages', platform, 'README.md')),
+  ];
+  for (const source of sources) {
+    const contents = fs.readFileSync(source, 'utf8');
+    assert.match(contents, /^# /, `${source} must start with a markdown heading`);
+    assert.ok(contents.length > 400, `${source} is too short to be a useful package page`);
+    assert.match(contents, /npm install -g remxo@rc/, `${source} must document the install command`);
+  }
+  for (const manifest of [launcherPackage, ...Object.values(TARGETS).map((target) => (
+    require(path.join(__dirname, '..', 'packages', target.key, 'package.json'))
+  ))]) {
+    assert.ok(manifest.files.includes('README.md'), `${manifest.name} must list README.md in files`);
+  }
 });
 
 test('packed launcher passes argv and exit status without optional registry access', (t) => {
@@ -130,6 +154,12 @@ test('packed launcher passes argv and exit status without optional registry acce
   assert.deepEqual(packedManifest.optionalDependencies, mainManifest(launcherPackage.version).optionalDependencies);
   assert.ok(fs.statSync(path.join(unpacked, 'bin', 'remxo.js')).isFile());
   assert.ok(fs.statSync(path.join(unpacked, 'lib', 'launch.js')).isFile());
+  assert.ok(packedManifest.files.includes('README.md'), 'packed launcher must list README.md in files');
+  assert.match(
+    fs.readFileSync(path.join(unpacked, 'README.md'), 'utf8'),
+    /^# remxo/,
+    'packed launcher must ship its README for the npm package page',
+  );
   assert.equal(fs.existsSync(path.join(unpacked, 'node_modules')), false);
 
   const expected = ['fixture.js', '--json', 'space separated', '中文🚀', 'double" and single\' quotes', 'trailing\\'];

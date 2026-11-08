@@ -12,7 +12,8 @@
   },
   "files": [
     "bin/",
-    "lib/"
+    "lib/",
+    "README.md"
   ],
   "engines": {
     "node": ">=18"
