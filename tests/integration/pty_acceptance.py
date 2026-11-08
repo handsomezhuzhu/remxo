@@ -581,7 +581,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             "interactive host form",
             [
                 (b"styled", b"\x1b[B\x1b[Bexample.invalid" + b"\x1b[B" * 15 + b"\r"),
-                (b"", b"\x1b[B\x1b[B\r"),
+                (b"Connection test passed", b"\x1b[B\x1b[B\r"),
             ],
             completion=lambda: (self.original / "audit.jsonl").exists(),
         ).run()
@@ -695,7 +695,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             "Vault password wizard test then save",
             [
                 (b"wizardpass", first_keys),
-                (b"", b"\x1b[B\x1b[B\r"),
+                (b"Connection test", b"\x1b[B\x1b[B\r"),
             ],
             completion=lambda: (self.original / "audit.jsonl").exists(),
         ).run()
@@ -772,7 +772,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             "Vault private key wizard test then save",
             [
                 (b"wizardkey", first_keys),
-                (b"", b"\x1b[B\x1b[B\r"),
+                (b"Connection test", b"\x1b[B\x1b[B\r"),
             ],
             completion=lambda: (self.original / "audit.jsonl").exists(),
         ).run()

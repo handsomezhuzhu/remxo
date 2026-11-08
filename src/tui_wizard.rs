@@ -761,6 +761,7 @@ struct ActionJob {
     original: Option<Host>,
     draft: Draft,
     language: crate::config::UiLanguage,
+    pending: bool,
     started: Instant,
     attempt: u32,
     retries: u32,
@@ -1058,11 +1059,12 @@ impl Wizard {
         let original = job.original.clone();
         let draft = job.draft.clone();
         let language = job.language;
+        let pending = job.pending;
         tokio::task::spawn_blocking(move || {
             let handle = tokio::runtime::Handle::current();
             let result = match kind {
                 ActionJobKind::Test => handle
-                    .block_on(test_connection(&paths, &alias, &host, language, false))
+                    .block_on(test_connection(&paths, &alias, &host, language, pending))
                     .map(ActionJobOutput::Tested),
                 ActionJobKind::Save | ActionJobKind::SaveExit | ActionJobKind::SaveTest => handle
                     .block_on(persist_host_data(
@@ -1096,6 +1098,7 @@ impl Wizard {
             original: self.original.clone(),
             draft: self.draft.clone(),
             language: self.language,
+            pending: self.original.is_none(),
             started: Instant::now(),
             attempt: 1,
             retries,
