@@ -61,13 +61,12 @@ remxo host key trust <alias> --fingerprint SHA256:...
 TUI 主机向导里也有对应步骤：
 
 ```text
-Host key fingerprint → Fetch host key → Trust host key
+Fetch host key → Trust host key
 ```
 
-- `fetch` 显示服务器侧指纹；
-- 人工核对后，把指纹粘贴到 `Host key fingerprint` 字段；
-- 只有粘贴指纹与 fetch 到的指纹一致，`Trust host key` 才会写入 known_hosts。
-- AI 不得自行 trust、伪造指纹或关闭主机密钥检查。
+- `Fetch host key` 自动显示服务器侧指纹，信息区自动换行；
+- 人工核对后，选择 `Trust host key` 并再次按 Enter 确认；
+- 不需要手动粘贴指纹；AI 不得自行 trust 或关闭主机密钥检查。
 
 ### 2. 优先只读巡检
 

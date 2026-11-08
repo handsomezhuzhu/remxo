@@ -7,7 +7,7 @@ use crate::task::TaskSummary;
 use crate::transport::openssh::OpensshTransport;
 use crate::tunnel::TunnelSummary;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -219,6 +219,8 @@ async fn run_loop(
         }
         match key.code {
             KeyCode::Char('q') => return Ok(()),
+            KeyCode::Esc => return Ok(()),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
             KeyCode::Tab | KeyCode::Right => app.page = (app.page + 1) % PAGES_EN.len(),
             KeyCode::BackTab | KeyCode::Left => {
                 app.page = (app.page + PAGES_EN.len() - 1) % PAGES_EN.len()
@@ -608,8 +610,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
                 )
             } else {
                 app.language.text(
-                    "1-7/Tab pages │ ↑↓ select │ a add │ e edit │ t test │ / search │ Enter SSH │ u unlock │ l lock │ q quit",
-                    "1-7/Tab 页面 │ ↑↓ 选择 │ a 添加 │ e 编辑 │ t 测试 │ / 搜索 │ Enter SSH │ u 解锁 │ l 锁定 │ q 退出",
+                    "1-7/Tab pages │ ↑↓ select │ a add │ e edit │ t test │ / search │ Enter SSH │ u unlock │ l lock │ q/Esc/Ctrl+C quit",
+                    "1-7/Tab 页面 │ ↑↓ 选择 │ a 添加 │ e 编辑 │ t 测试 │ / 搜索 │ Enter SSH │ u 解锁 │ l 锁定 │ q/Esc/Ctrl+C 退出",
                 )
             }
         ))

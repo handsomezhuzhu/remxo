@@ -181,7 +181,7 @@ Paste          Insert at the cursor (bracketed paste)
 Backspace      Delete before the cursor
 Delete         Delete at the cursor
 Ctrl+U/W/L     Delete to start / previous word / clear the field
-Enter          Run the focused action: Fetch host key, Trust host key, Test, Save, Save & test, Save & exit, or Exit
+Enter          Run the focused action: Fetch host key, Trust host key, Test, Save, Save & test, Save & exit, or Exit. Press q, Esc, or Ctrl+C to leave the main TUI.
 Tab / BackTab  Move field focus
 Esc            Ask whether to save: S saves and exits, Enter exits without saving, Esc cancels
 ```
