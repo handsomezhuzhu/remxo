@@ -6,3 +6,4 @@
 *.toml text eol=lf
 *.yml text eol=lf
 Cargo.lock text eol=lf
+LICENSE text eol=lf

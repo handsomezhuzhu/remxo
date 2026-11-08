@@ -28,6 +28,19 @@ function numberField(block, offset, length) {
   return value ? Number.parseInt(value, 8) : 0;
 }
 
+/**
+ * Read a repository text file with line endings normalized.
+ *
+ * Checkouts do not all use LF: without an explicit `eol=lf` attribute a
+ * Windows checkout materializes CRLF, which would make line-anchored
+ * assertions depend on the platform instead of on the content.
+ */
+function repositoryText(...relative) {
+  return fs
+    .readFileSync(path.join(__dirname, '..', '..', ...relative), 'utf8')
+    .replace(/\r\n/g, '\n');
+}
+
 function extractNpmTarball(tarball, destination) {
   const archive = zlib.gunzipSync(fs.readFileSync(tarball));
   fs.mkdirSync(destination, { recursive: true });
@@ -140,7 +153,7 @@ test('every npm package ships a non-trivial README', () => {
 });
 
 test('every npm package ships the repository LICENSE', (t) => {
-  const license = fs.readFileSync(path.join(__dirname, '..', '..', 'LICENSE'), 'utf8');
+  const license = repositoryText('LICENSE');
   assert.match(license, /^MIT License\n/, 'LICENSE must be the MIT license text');
   assert.match(license, /Copyright \(c\) \d{4} /, 'LICENSE must carry a copyright line');
 
@@ -152,7 +165,12 @@ test('every npm package ships the repository LICENSE', (t) => {
   stageCore(staged, 'win32-x64', artifact, '2.0.0', {
     spawnSync: () => ({ status: 0, signal: null, stdout: 'remxo 2.0.0\n', stderr: '' }),
   });
-  assert.equal(fs.readFileSync(path.join(staged, 'LICENSE'), 'utf8'), license);
+  // Compare normalized text: the staged copy is byte-identical to whatever the
+  // checkout materialized, so a raw comparison would only restate the checkout.
+  assert.equal(
+    fs.readFileSync(path.join(staged, 'LICENSE'), 'utf8').replace(/\r\n/g, '\n'),
+    license,
+  );
 
   for (const manifest of [launcherPackage, ...Object.values(TARGETS).map((target) => (
     require(path.join(__dirname, '..', 'packages', target.key, 'package.json'))
