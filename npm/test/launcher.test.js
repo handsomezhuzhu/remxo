@@ -84,7 +84,7 @@ test('resolved package uses its versioned vendor target path', (t) => {
     env: {},
     launcherManifestPath: fixture.launcherManifestPath,
   });
-  assert.equal(core.binaryPath, fixture.binaryPath);
+  assert.equal(core.binaryPath, fs.realpathSync(fixture.binaryPath));
   assert.equal(core.packageVersion, '0.1.0');
 });
 
@@ -98,7 +98,7 @@ test('explicit core path never searches PATH and a missing override fails', (t) 
     env: { REMXO_CORE_PATH: file },
     launcherManifestPath: path.join(directory, 'absent-package.json'),
   });
-  assert.equal(core.binaryPath, file);
+  assert.equal(core.binaryPath, fs.realpathSync(file));
   assert.equal(core.packageVersion, null);
   assert.throws(
     () => resolveCore({ platform: 'win32', arch: 'x64', env: { REMXO_CORE_PATH: 'definitely-not-on-path' } }),
