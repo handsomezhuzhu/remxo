@@ -21,7 +21,7 @@ concurrency:
 jobs:
   core:
     name: ${{ matrix.platform }} core
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -29,20 +29,12 @@ jobs:
       matrix:
         include:
           - platform: win32-x64
-            os: windows-latest
+            runner: windows-latest
             rust-target: x86_64-pc-windows-msvc
             binary: remxo.exe
           - platform: linux-x64
-            os: ubuntu-latest
+            runner: instabox-medium
             rust-target: x86_64-unknown-linux-gnu
-            binary: remxo
-          - platform: darwin-x64
-            os: macos-15-intel
-            rust-target: x86_64-apple-darwin
-            binary: remxo
-          - platform: darwin-arm64
-            os: macos-15
-            rust-target: aarch64-apple-darwin
             binary: remxo
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +85,7 @@ jobs:
   launcher:
     name: remxo launcher
     needs: core
-    runs-on: ubuntu-latest
+    runs-on: instabox-medium
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -126,6 +118,20 @@ jobs:
             --main \
             --version "${{ steps.release-version.outputs.version }}" \
             --out "$PWD/artifacts/launcher"
+      - uses: actions/download-artifact@v4
+        with:
+          name: remxo-core-linux-x64
+          path: artifacts/linux-x64
+      - name: Smoke-test the exact Linux tarball installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="${RUNNER_TEMP}/remxo-npm-smoke"
+          npm install --prefix "$destination" \
+            --ignore-scripts --omit=optional --offline --no-audit --no-fund \
+            "$PWD"/artifacts/launcher/*.tgz "$PWD"/artifacts/linux-x64/*.tgz
+          test "$("$destination/node_modules/.bin/remxo" --version)" = "remxo ${{ steps.release-version.outputs.version }}"
+          "$destination/node_modules/.bin/remxo" --help > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: remxo-npm-launcher

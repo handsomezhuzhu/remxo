@@ -18,22 +18,6 @@ const TARGETS = Object.freeze({
     cpu: 'x64',
     libc: 'glibc',
   }),
-  'darwin-x64': Object.freeze({
-    key: 'darwin-x64',
-    packageName: '@remxo/core-darwin-x64',
-    rustTarget: 'x86_64-apple-darwin',
-    executable: 'remxo',
-    os: 'darwin',
-    cpu: 'x64',
-  }),
-  'darwin-arm64': Object.freeze({
-    key: 'darwin-arm64',
-    packageName: '@remxo/core-darwin-arm64',
-    rustTarget: 'aarch64-apple-darwin',
-    executable: 'remxo',
-    os: 'darwin',
-    cpu: 'arm64',
-  }),
 });
 
 function resolveTarget(platform = process.platform, arch = process.arch) {

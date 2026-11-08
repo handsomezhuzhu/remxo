@@ -41,8 +41,9 @@
 - wizard Test/Save 都先导入 Vault SSH 凭据；Test 失败或 Esc 不保存 Host，但已导入秘密仍以密文留 Vault，不得宣称全事务或自动回滚。直接 Save 在凭据成功后写 Host，不要求预先成功 Test；sudo 在 Host 保存后另配，失败不回滚 Host。已有 Host 编辑固定 alias、执行 expected-Host 检查；非秘密编辑保留原凭据，显式轮换用新版 credential stem，保存并测试先保存再用登记 Host 测试，已登记 alias 不得改为 pending 测试。旧凭据保留，不宣称跨配置/Vault 回滚或自动安全擦除。
 - 安全文档描述了 Broker、Vault、认证 Secret 交接、传输、任务、备份和 TUI；改变这些行为时同步更新 README（英文及完整等价 `README.zh-CN.md`）、SECURITY、THREAT_MODEL、ARCHITECTURE、TESTING 及本文件的适用部分。
 - 默认测试使用 fake ssh/scp 和临时数据目录；禁止真实凭据、用户 `~/.ssh`、生产服务器或虚构验证结果。私钥/密码 fixture 只能显式 test-only，失败日志不得输出 Secret/PEM。
-- `.github/workflows/` 定义原生和 `runs-on: instabox-medium` 的 GitHub CI；改变需要的权限、资源或运行方式时同步 TESTING.md。最多 3 个并发。`scripts/test/instabox-run.sh` 只用于官方 `instabox run` 开发期测试，不是 Actions backend，不用于 push 后 CI。
+- `.github/workflows/` 定义原生和 `runs-on: instabox-medium` 的 GitHub CI；Linux 检查、MSRV、npm 检查及 Linux 打包/安装验收尽量统一放 Instabox，避免消耗私有仓库 GitHub 原生 runner 额度。改变需要的权限、资源或运行方式时同步 TESTING.md。最多 3 个并发。`scripts/test/instabox-run.sh` 只用于官方 `instabox run` 开发期测试，不是 Actions backend，不用于 push 后 CI。
 - npm 分发保持薄 Node 启动器，UI/Broker/Vault 全部归 Rust；按 os/arch 锁定精确同版本 optional 平台包，缺包/版本不匹配 fail closed，不回退 PATH。普通 CLI 用 argv/继承终端启动，Unix `execve` 必须带 argv0；不使用 shell、持久 Node TUI、postinstall 下载或用户侧编译。发布 artifact 必须核实 `remxo --version`，未做实际 tarball/平台验收不得宣称安装可用。
+- Windows 保持 GitHub 原生 runner；macOS 适配与产物目标在真实 Apple 设备可验证前暂停，不发布未验收的 macOS optional 包。Daytona 不纳入默认 CI；默认 Linux 全部使用 Instabox，避免消耗 GitHub 私有 runner 额度。
 
 开发检查：
 

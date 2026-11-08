@@ -100,7 +100,7 @@ Vault 私钥仅在 OpenSSH 需要时通过单 Secret RPC 取出，并写入数�
 ### npm 原生分发边界
 
 - npm 只是原生 Rust 二进制的分发与启动方式，不引入 JS Vault/Broker/TUI。optional 包必须按 os/arch 与主包精确同版本，缺包或版本不一致失败关闭；不使用 PATH 上的任意替代程序。
-- 不支持安装脚本下载二进制、用户侧 Cargo 编译或运行时自动更新；暂存时核对 `remxo --version`。待执行发布、升级和 macOS 签名/notarization 验收前，不宣称完整 registry 发布通过。
+- 不支持安装脚本下载二进制、用户侧 Cargo 编译或运行时自动更新；暂存时核对 `remxo --version`。npm 主包和 optional 平台包当前只覆盖 Windows x64 与 Linux x64（glibc）；macOS 适配及产物目标在真实设备可验证前暂停，不宣称未验收的 macOS 支持或完整 registry 发布通过。
 - 打包后 ASKPASS 与 daemon 仍以 native executable 运行，而非 Node；Node 微调包具有启动本地二进制的权限，其完整性也是供应链边界，不能提供 L2 同用户隔离。
 
 ## 依赖审计说明

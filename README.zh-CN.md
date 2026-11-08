@@ -31,9 +31,9 @@ Remxo 是本地远程服务器清单、编排与执行工具。它复用系统 O
 npm install -g remxo
 ```
 
-需要 Node.js 18 或更新版本。npm 主包只包含轻量启动器；精确同版本的 optional 平台包携带预编译 Rust 可执行文件。当前打包目标包括 Windows x64、Linux x64（glibc），macOS x64/ARM64 的构建产物打包也已接入发布 CI。启动器根据 `process.platform`/`process.arch` 选择平台包，校验版本和内嵌二进制，在支持的 Unix 上通过 `execve` 替换 Node，在 Windows 上直接以 argv、`stdio: inherit` 启动子进程。它不使用本地 shell、Node TUI、postinstall 下载、用户侧 Cargo 编译、运行时自动更新，也不会静默回退到 PATH 上任意版本的 Remxo。缺少或错配平台包会明确失败。Alpine/musl 及其他未列出的平台需要独立原生构建与验证，glibc 包不保证能在这些平台运行。
+需要 Node.js 18 或更新版本。npm 主包只包含轻量启动器；精确同版本的 optional 平台包携带预编译 Rust 可执行文件。当前打包目标仅包括 Windows x64、Linux x64（glibc），macOS 适配和产物目标在拥有真实 Apple 设备进行验证之前暂停，当前 optional 包有意只覆盖 Windows/Linux。启动器根据 `process.platform`/`process.arch` 选择平台包，校验版本和内嵌二进制，在支持的 Unix 上通过 `execve` 替换 Node，在 Windows 上直接以 argv、`stdio: inherit` 启动子进程。它不使用本地 shell、Node TUI、postinstall 下载、用户侧 Cargo 编译、运行时自动更新，也不会静默回退到 PATH 上任意版本的 Remxo。缺少或错配平台包会明确失败。Alpine/musl 及其他未列出的平台需要独立原生构建与验证，glibc 包不保证能在这些平台运行。
 
-发布产物由 `.github/workflows/npm-release.yml` 在版本 tag 或手动触发时构建；该工作流本身不会发布 npm。包版本与原生 `remxo --version` 必须精确一致。本地构建产物暂存方式：
+发布产物由 `.github/workflows/npm-release.yml` 在版本 tag 或手动触发时构建；该工作流本身不会发布 npm。包版本与原生 `remxo --version` 必须精确一致。Linux 构建、启动器检查及精确 Linux tarball 安装验收在 `instabox-medium` 上执行，只有不可替代的 Windows 任务消耗 GitHub 原生 runner 额度。本地构建产物暂存方式：
 
 ```console
 cargo build --release

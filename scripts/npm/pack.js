@@ -159,7 +159,7 @@ function usage() {
     'Pack the launcher:',
     '  node scripts/npm/pack.js --main --out <directory>',
     'Pack one native core on its matching host:',
-    '  node scripts/npm/pack.js --platform <win32-x64|linux-x64|darwin-x64|darwin-arm64> --artifact <remxo binary> --out <directory>',
+    '  node scripts/npm/pack.js --platform <win32-x64|linux-x64> --artifact <remxo binary> --out <directory>',
   ].join('\n');
 }
 

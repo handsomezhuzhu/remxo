@@ -29,6 +29,8 @@ jobs:
             command: rustup component add rustfmt clippy && cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-targets -- --test-threads=1 && cargo build --release
           - name: Dependency and Python audit
             command: python3 -m compileall -q tests/integration tests/run_all.py && cargo install cargo-audit --locked && cargo audit
+          - name: Linux MSRV and npm launcher
+            command: docker run --rm --volume "$PWD:/data/workspace/remxo" --workdir /data/workspace/remxo rust:1.88.0-slim-bookworm bash -c 'cargo test --all-targets -- --test-threads=1' && npm test --prefix npm
           - name: Fault PTY and TUI
             command: cargo build && python3 tests/run_all.py --only fake && python3 tests/run_all.py --only pty
           - name: Real SSH and sudo

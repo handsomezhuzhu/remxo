@@ -34,18 +34,15 @@ function coreFixture(directory, version = '0.1.0') {
   return { binaryPath, launcherManifestPath };
 }
 
-test('target mappings cover exactly the four declared native packages', () => {
+test('target mappings cover only the verified Windows and Linux packages', () => {
   assert.deepEqual(Object.keys(TARGETS).sort(), [
-    'darwin-arm64',
-    'darwin-x64',
     'linux-x64',
     'win32-x64',
   ]);
   assert.equal(resolveTarget('win32', 'x64').rustTarget, 'x86_64-pc-windows-msvc');
   assert.equal(resolveTarget('linux', 'x64').rustTarget, 'x86_64-unknown-linux-gnu');
   assert.equal(resolveTarget('linux', 'x64').libc, 'glibc');
-  assert.equal(resolveTarget('darwin', 'x64').rustTarget, 'x86_64-apple-darwin');
-  assert.equal(resolveTarget('darwin', 'arm64').rustTarget, 'aarch64-apple-darwin');
+  assert.throws(() => resolveTarget('darwin', 'arm64'), /unsupported platform: darwin-arm64/);
   assert.throws(() => resolveTarget('linux', 'arm64'), /unsupported platform/);
   assert.throws(() => resolveTarget('win32', 'arm64'), /unsupported platform/);
   assert.throws(() => resolveTarget('freebsd', 'x64'), /unsupported platform/);

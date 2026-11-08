@@ -199,21 +199,21 @@ PTY transcript 仅做内存泄漏检查，不打印密码或大段终端内容�
 ### npm 薄启动器与分发
 
 - `npm test --prefix npm` 使用 Node 内置测试驱动，校验 os/arch/target triple、可选包缺失/版本错配拒绝、Unix `execve` 的 argv0、Windows argv/退出码与信号转发、发布 manifest 精确版本锁定、native 版本握手及离线 tarball 解包透传。
-- 该 suite 在当前 Windows x64 与隔离 Linux x64 上分别实跑 11/11；Windows 还实际打包并启动 native core。Linux 另做实际 platform/core tarball 打包检查；macOS 原生执行和 app bundle/签名/notarization 尚未验收，统一标 `NOT_RUN`。
+- 该 suite 在当前 Windows x64 与隔离 Linux x64 上分别实跑 11/11；Windows 还实际打包并启动 native core。Linux 另做实际 platform/core tarball 打包检查。macOS 适配与产物目标暂停，未提供或验证 macOS optional 包。
 - 普通安装不用 `postinstall` 下载、用户侧 Cargo、N-API 或 PATH 回退。`REMXO_CORE_PATH` 仅用于开发或隔离 fake，不能把它描述成生产解析规则。
-- `.github/workflows/ci.yml` 的 `npm-launcher` 在三种 OS 执行上述测试；`.github/workflows/npm-release.yml` 用同一版本 Rust release 构建与 native `--version` 握手打包，上传 artifact、不自动发布。真实 npm registry 发布、macOS 实机安装、跨发布版本升级及 npm Trusted Publishing 尚未执行，必须保留为待验收或 `NOT_RUN`。
+- `.github/workflows/ci.yml` 的 `npm-launcher` 在 Windows 执行上述测试，其余 Linux 检查都放在 Instabox；`.github/workflows/npm-release.yml` 用同一版本 Rust release 构建与 native `--version` 握手打包并上传 artifact，不自动发布。真实 npm registry 发布、跨发布版本升级及 npm Trusted Publishing 尚未执行，必须保留为待验收或 `NOT_RUN`；macOS 适配与打包目前暂停。
 
 ## GitHub Actions and Instabox CI
 
-- `.github/workflows/ci.yml`: Linux、macOS、Windows 上的 fmt、Clippy、Rust 全部测试和构建，补充 Linux Docker 的 Rust 1.88 MSRV 测试，以及三 OS 的 `npm-launcher` 测试。这些普通 GitHub runner 不占 Instabox 配额。
-- `.github/workflows/instabox.yml`: 5 类隔离任务，直接 `runs-on: instabox-medium`，覆盖 Rust/release 检查、cargo-audit/Python 静态检查、fake/PTY/TUI、真实 sshd/sudo、20 轮并发稳定性。GitHub App 为每个 job 提供新 Ubuntu 24.04 runner 并在迭代结束时删除；不注入用户 Vault/Secrets。最多 3 个并发，避免一分钟启动限流。
+- `.github/workflows/ci.yml`: Windows 上的 fmt、Clippy、Rust 全部测试和构建，以及 Windows `npm-launcher` 测试。为节省私有仓库的 GitHub 原生 runner 额度，Ubuntu Rust 检查、Rust 1.88 MSRV Docker 和 Linux npm 检查统一放到 Instabox；不把 Linux 结果外推成其他系统通过。macOS 适配和产物目标目前暂停。
+- `.github/workflows/instabox.yml`: 6 类隔离任务，直接 `runs-on: instabox-medium`，覆盖 Rust/release 检查、Rust 1.88 MSRV Docker 与 Linux npm 启动器、cargo-audit/Python 静态检查、fake/PTY/TUI、真实 sshd/sudo、20 轮并发稳定性。GitHub App 为每个 job 提供新 Ubuntu 24.04 runner 并在迭代结束时删除；不注入用户 Vault/Secrets。最多 3 个并发，避免一分钟启动限流。
 - 该 App 使用 GitHub 所需 Metadata/Actions/Administration 权限注册和回收 runner；App backend 不需要 `runs-on: instabox-medium` 作业配置 API Key。公开 fork PR 不启动这些任务，skipped/not_run 不代表通过。
-- `.github/workflows/npm-release.yml`: 版本 tag 或手动触发，最多 3 个并发，按精确版本构建 Windows/Linux(glibc)/macOS native core、打包 npm 平台包与启动器并上传 tarball artifact；不自动发布、不注入用户 Vault/Secrets。真实 registry 发布、macOS 安装和签名/notarization 未因此标为通过。
+- `.github/workflows/npm-release.yml`: 版本 tag 或手动触发，最多 3 个并发。Linux core 与 launcher 在 `instabox-medium` 上完成精确版本构建、打包及精确 tarball 安装验收；Windows 在 GitHub 原生 runner 上构建。上传 tarball artifact，不自动发布、不注入用户 Vault/Secrets。真实 registry 发布和 npm Trusted Publishing 未因此标为通过，macOS 产物目标目前暂停。
 - `scripts/test/instabox-run.sh` 用官方 `instabox run --push . --timeout 10m` 的方法做开发期单次测试，命令结束自动删机；它不是 GitHub Actions runner，也未用于 push 后的 CI。
 - `tests/property_invariants.rs`：任意 Unicode 多参数 token 往返、单 raw script 语义、输出 UTF8/控制符边界、明确秘密格式，以及 target 优先级。每组 property 128 例。
 - 历史 CI 或另一提交的绿灯不能替代当前认证改动的测试；报告必须对应实际源状态、二进制和 suite。
 
-CI 的覆盖并未把本工具自称为跨发行版或跨平台全兼容；Windows/macOS 原生基础测试、Linux 交互协议测试、真实 Vault 认证和 L1 威胁模型是不同层次。
+CI 的覆盖并未把本工具自称为跨发行版或跨平台全兼容；Windows 原生基础测试、Linux 交互协议测试、真实 Vault 认证和 L1 威胁模型是不同层次。macOS 适配与产物目标暂停，未列入当前可选平台包。
 
 ## 清理与安全约束
 

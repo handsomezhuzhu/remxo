@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -58,18 +58,3 @@ jobs:
       - name: Test launcher and offline package
         shell: bash
         run: npm test --prefix npm
-
-  msrv:
-    name: Linux / Rust 1.88 MSRV
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test with the declared minimum Rust version
-        shell: bash
-        run: |
-          docker run --rm \
-            --volume "$PWD:/data/workspace/remxo" \
-            --workdir /data/workspace/remxo \
-            rust:1.88.0-slim-bookworm \
-            bash -c 'cargo test --all-targets -- --test-threads=1'
