@@ -20,6 +20,7 @@ remxo [GLOBAL_OPTIONS] <TARGET> [REMOTE_ARGUMENTS...]
 | `--verbose` | 被 clap 接收；文档不据此承诺特定调试输出 |
 | `--sudo` | exec/task 使用独立 sudo 凭据 |
 | `--overwrite` | put/get 允许覆盖 |
+| `--retries <N>` | 覆盖 `settings.retry_attempts`，范围 1–10 |
 | `-h`、`--help` | 帮助 |
 | `-V`、`--version` | 版本 |
 

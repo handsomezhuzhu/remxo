@@ -213,6 +213,9 @@ fn default_timeout() -> u64 {
 fn default_max_output() -> usize {
     65_536
 }
+fn default_retry_attempts() -> u32 {
+    3
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -248,6 +251,7 @@ pub struct Settings {
     pub max_output: usize,
     pub allow_overwrite: bool,
     pub audit_output: bool,
+    pub retry_attempts: u32,
     pub language: UiLanguage,
 }
 
@@ -259,6 +263,7 @@ impl Default for Settings {
             max_output: default_max_output(),
             allow_overwrite: false,
             audit_output: false,
+            retry_attempts: default_retry_attempts(),
             language: UiLanguage::En,
         }
     }
@@ -296,6 +301,12 @@ impl Config {
             return Err(AppError::new(
                 ErrorCode::InvalidConfig,
                 "timeout_seconds and max_output must be greater than zero",
+            ));
+        }
+        if self.settings.retry_attempts == 0 || self.settings.retry_attempts > 10 {
+            return Err(AppError::new(
+                ErrorCode::InvalidConfig,
+                "retry_attempts must be between 1 and 10",
             ));
         }
         let mut numbers = BTreeMap::new();

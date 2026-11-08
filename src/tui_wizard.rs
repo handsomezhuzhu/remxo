@@ -23,7 +23,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use std::io::{Stdout, stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionMode {
@@ -558,6 +559,8 @@ struct Wizard {
     host_keys: Vec<crate::hostkey::FetchedHostKey>,
     host_key_trusted: bool,
     host_key_confirm_pending: bool,
+    host_key_job: Option<HostKeyJob>,
+    retry_attempts: u32,
     client: BrokerClient,
     original: Option<Host>,
 }
@@ -609,6 +612,8 @@ impl Wizard {
             host_keys: Vec::new(),
             host_key_trusted: false,
             host_key_confirm_pending: false,
+            host_key_job: None,
+            retry_attempts: config.settings.retry_attempts.clamp(1, 10),
             original,
         })
     }
@@ -711,6 +716,37 @@ enum Action {
     TrustHostKey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostKeyJobKind {
+    Fetch,
+    Trust,
+}
+
+enum HostKeyJobOutput {
+    Keys(Vec<crate::hostkey::FetchedHostKey>),
+    Trusted(crate::hostkey::HostKeyTrustResult),
+}
+
+struct HostKeyJob {
+    kind: HostKeyJobKind,
+    alias: String,
+    host: Host,
+    started: Instant,
+    attempt: u32,
+    retries: u32,
+    retry_at: Option<Instant>,
+    receiver: Option<oneshot::Receiver<Result<HostKeyJobOutput>>>,
+}
+
+fn host_key_spinner(elapsed: Duration) -> &'static str {
+    match (elapsed.as_millis() / 150) % 4 {
+        0 => "|",
+        1 => "/",
+        2 => "-",
+        _ => "\\",
+    }
+}
+
 async fn save_host(
     wizard: &mut Wizard,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -725,10 +761,12 @@ async fn save_host(
 fn saved_message(wizard: &Wizard, alias: &str) -> String {
     match wizard.language {
         crate::config::UiLanguage::ZhCn => {
-            format!("主机 '{alias}' 已保存。可继续修改，或选择“保存并退出”。")
+            format!("主机 '{alias}' 已覆盖保存。可继续修改，或选择“保存并退出”。")
         }
         crate::config::UiLanguage::En => {
-            format!("Host '{alias}' saved. Continue editing, or choose Save & exit.")
+            format!(
+                "Host '{alias}' overwritten in config. Continue editing, or choose Save & exit."
+            )
         }
     }
 }
@@ -737,6 +775,217 @@ fn combine_message(warning: Option<String>, message: String) -> String {
     match warning {
         Some(warning) if !warning.trim().is_empty() => format!("{warning} {message}"),
         _ => message,
+    }
+}
+
+impl Wizard {
+    fn host_key_busy_message(
+        &self,
+        kind: HostKeyJobKind,
+        started: Instant,
+        attempt: u32,
+        retries: u32,
+    ) -> String {
+        let elapsed = started.elapsed().as_secs_f32();
+        let label = match kind {
+            HostKeyJobKind::Fetch => self.language.text("获取主机密钥", "Fetch host key"),
+            HostKeyJobKind::Trust => self.language.text("信任主机密钥", "Trust host key"),
+        };
+        match self.language {
+            crate::config::UiLanguage::ZhCn => format!(
+                "{} {} 正在{}... {:.1}s 第 {}/{} 次",
+                host_key_spinner(started.elapsed()),
+                label,
+                label,
+                elapsed,
+                attempt,
+                retries
+            ),
+            crate::config::UiLanguage::En => format!(
+                "{} {}... {:.1}s attempt {}/{}",
+                host_key_spinner(started.elapsed()),
+                label,
+                elapsed,
+                attempt,
+                retries
+            ),
+        }
+    }
+
+    fn spawn_host_key_attempt(&mut self) {
+        let Some(job) = self.host_key_job.as_mut() else {
+            return;
+        };
+        let (sender, receiver) = oneshot::channel();
+        let kind = job.kind;
+        let alias = job.alias.clone();
+        let host = job.host.clone();
+        tokio::spawn(async move {
+            let result = match kind {
+                HostKeyJobKind::Fetch => {
+                    crate::hostkey::fetch_once(&host).map(HostKeyJobOutput::Keys)
+                }
+                HostKeyJobKind::Trust => crate::hostkey::trust_with_retries(&alias, &host, None, 1)
+                    .map(HostKeyJobOutput::Trusted),
+            };
+            let _ = sender.send(result);
+        });
+        job.receiver = Some(receiver);
+        job.retry_at = None;
+    }
+
+    fn start_host_key_job(&mut self, kind: HostKeyJobKind, alias: String, host: Host) {
+        let retries = self.retry_attempts.max(1);
+        self.host_key_job = Some(HostKeyJob {
+            kind,
+            alias,
+            host,
+            started: Instant::now(),
+            attempt: 1,
+            retries,
+            retry_at: None,
+            receiver: None,
+        });
+        self.spawn_host_key_attempt();
+        if let Some(job) = self.host_key_job.as_ref() {
+            self.message =
+                self.host_key_busy_message(job.kind, job.started, job.attempt, job.retries);
+        }
+        self.failed = false;
+        self.tested = false;
+    }
+
+    fn update_host_key_job(&mut self) {
+        let Some(job) = self.host_key_job.as_mut() else {
+            return;
+        };
+        if job.receiver.is_none() {
+            if let Some(retry_at) = job.retry_at
+                && Instant::now() >= retry_at
+            {
+                let attempt = job.attempt;
+                let retries = job.retries;
+                self.spawn_host_key_attempt();
+                self.message = match self.language {
+                    crate::config::UiLanguage::ZhCn => {
+                        format!("正在重试 第 {attempt}/{retries} 次...")
+                    }
+                    crate::config::UiLanguage::En => {
+                        format!("Retrying attempt {attempt}/{retries}...")
+                    }
+                };
+            }
+            return;
+        }
+        let received = job
+            .receiver
+            .as_mut()
+            .map(|receiver| receiver.try_recv())
+            .unwrap_or(Err(oneshot::error::TryRecvError::Closed));
+        match received {
+            Ok(Ok(output)) => {
+                self.host_key_job = None;
+                match output {
+                    HostKeyJobOutput::Keys(keys) => {
+                        self.host_keys = keys.clone();
+                        self.host_key_trusted = false;
+                        self.host_key_confirm_pending = false;
+                        let fingerprints = keys
+                            .iter()
+                            .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                            .collect::<Vec<_>>()
+                            .join("\n  ");
+                        self.message = match self.language {
+                            crate::config::UiLanguage::ZhCn => format!(
+                                "服务器主机密钥指纹：\n  {fingerprints}\n请人工核对。确认后选择“信任主机密钥”，并再次按 Enter。"
+                            ),
+                            crate::config::UiLanguage::En => format!(
+                                "Server host key fingerprints:\n  {fingerprints}\nVerify manually. Then choose Trust host key and press Enter again."
+                            ),
+                        };
+                        self.failed = false;
+                        self.tested = false;
+                    }
+                    HostKeyJobOutput::Trusted(result) => {
+                        self.host_key_trusted = true;
+                        self.host_key_confirm_pending = false;
+                        self.message = match self.language {
+                            crate::config::UiLanguage::ZhCn => {
+                                if result.added.is_empty() {
+                                    format!(
+                                        "主机 '{}' 的主机密钥已在 known_hosts 中。",
+                                        result.host
+                                    )
+                                } else {
+                                    format!("主机 '{}' 的主机密钥已信任。", result.host)
+                                }
+                            }
+                            crate::config::UiLanguage::En => {
+                                if result.added.is_empty() {
+                                    format!("Host '{}' key is already in known_hosts.", result.host)
+                                } else {
+                                    format!("Host '{}' key trusted.", result.host)
+                                }
+                            }
+                        };
+                        self.failed = false;
+                        self.tested = false;
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                let attempt = job.attempt;
+                let retries = job.retries;
+                if attempt < retries {
+                    job.attempt = attempt + 1;
+                    job.receiver = None;
+                    job.retry_at = Some(Instant::now() + Duration::from_millis(250));
+                    let detail = crate::i18n::error_message(&error, self.language);
+                    self.message = match self.language {
+                        crate::config::UiLanguage::ZhCn => {
+                            format!("第 {attempt}/{retries} 次失败：{detail}\n正在重试...")
+                        }
+                        crate::config::UiLanguage::En => {
+                            format!("Attempt {attempt}/{retries} failed: {detail}\nRetrying...")
+                        }
+                    };
+                    self.failed = true;
+                    self.tested = false;
+                } else {
+                    self.host_key_job = None;
+                    self.message = match self.language {
+                        crate::config::UiLanguage::ZhCn => format!(
+                            "主机密钥操作在 {retries} 次尝试后仍失败：{}",
+                            crate::i18n::error_message(&error, self.language)
+                        ),
+                        crate::config::UiLanguage::En => format!(
+                            "Host key operation failed after {retries} attempts: {}",
+                            crate::i18n::error_message(&error, self.language)
+                        ),
+                    };
+                    self.failed = true;
+                    self.tested = false;
+                }
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {
+                if let Some(job) = self.host_key_job.as_ref() {
+                    self.message =
+                        self.host_key_busy_message(job.kind, job.started, job.attempt, job.retries);
+                }
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.host_key_job = None;
+                self.message = self
+                    .language
+                    .text(
+                        "Host key worker stopped unexpectedly.",
+                        "主机密钥后台工作意外停止。",
+                    )
+                    .into();
+                self.failed = true;
+                self.tested = false;
+            }
+        }
     }
 }
 
@@ -770,6 +1019,7 @@ pub async fn attach(
 ) -> Result<WizardResult> {
     let mut wizard = Wizard::with_original(paths, alias, initial, original, no_color)?;
     loop {
+        wizard.update_host_key_job();
         terminal
             .draw(|frame| draw(frame, &wizard))
             .map_err(|error| AppError::io("draw host wizard", error))?;
@@ -787,6 +1037,9 @@ pub async fn attach(
         let Event::Key(key) = incoming else {
             continue;
         };
+        if wizard.host_key_job.is_some() {
+            continue;
+        }
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -806,10 +1059,10 @@ pub async fn attach(
                                     let message =
                                         warning.unwrap_or_else(|| match wizard.language {
                                             crate::config::UiLanguage::ZhCn => {
-                                                format!("主机 '{alias}' 已保存并退出。")
+                                                format!("主机 '{alias}' 已覆盖保存并退出。")
                                             }
                                             crate::config::UiLanguage::En => {
-                                                format!("Host '{alias}' saved and exited.")
+                                                format!("Host '{alias}' overwritten and exited.")
                                             }
                                         });
                                     return Ok(WizardResult {
@@ -856,33 +1109,9 @@ pub async fn attach(
         match key.code {
             KeyCode::Enter if wizard.focused >= ACTION_FETCH_HOST_KEY => match wizard.action() {
                 Action::FetchHostKey => match wizard.draft.host() {
-                    Ok((_alias, host)) => match crate::hostkey::fetch(&host) {
-                        Ok(keys) => {
-                            wizard.host_keys = keys.clone();
-                            wizard.host_key_trusted = false;
-                            wizard.host_key_confirm_pending = false;
-                            let fingerprints = keys
-                                .iter()
-                                .map(|key| format!("{} {}", key.key_type, key.fingerprint))
-                                .collect::<Vec<_>>()
-                                .join("\n  ");
-                            wizard.message = match wizard.language {
-                                crate::config::UiLanguage::ZhCn => format!(
-                                    "服务器主机密钥指纹：\n  {fingerprints}\n请人工核对。确认后选择“信任主机密钥”，并再次按 Enter。"
-                                ),
-                                crate::config::UiLanguage::En => format!(
-                                    "Server host key fingerprints:\n  {fingerprints}\nVerify manually. Then choose Trust host key and press Enter again."
-                                ),
-                            };
-                            wizard.failed = false;
-                            wizard.tested = false;
-                        }
-                        Err(error) => {
-                            wizard.message = crate::i18n::error_message(&error, wizard.language);
-                            wizard.failed = true;
-                            wizard.tested = false;
-                        }
-                    },
+                    Ok((alias, host)) => {
+                        wizard.start_host_key_job(HostKeyJobKind::Fetch, alias, host);
+                    }
                     Err(error) => {
                         wizard.message = crate::i18n::error_message(&error, wizard.language);
                         wizard.failed = true;
@@ -924,42 +1153,7 @@ pub async fn attach(
                             wizard.tested = false;
                             continue;
                         }
-                        match crate::hostkey::trust(&alias, &host, None) {
-                            Ok(result) => {
-                                wizard.host_key_trusted = true;
-                                wizard.host_key_confirm_pending = false;
-                                wizard.message = match wizard.language {
-                                    crate::config::UiLanguage::ZhCn => {
-                                        if result.added.is_empty() {
-                                            format!(
-                                                "主机 '{}' 的主机密钥已在 known_hosts 中。",
-                                                alias
-                                            )
-                                        } else {
-                                            format!("主机 '{}' 的主机密钥已信任。", alias)
-                                        }
-                                    }
-                                    crate::config::UiLanguage::En => {
-                                        if result.added.is_empty() {
-                                            format!(
-                                                "Host '{}' key is already in known_hosts.",
-                                                alias
-                                            )
-                                        } else {
-                                            format!("Host '{}' key trusted.", alias)
-                                        }
-                                    }
-                                };
-                                wizard.failed = false;
-                                wizard.tested = false;
-                            }
-                            Err(error) => {
-                                wizard.message =
-                                    crate::i18n::error_message(&error, wizard.language);
-                                wizard.failed = true;
-                                wizard.tested = false;
-                            }
-                        }
+                        wizard.start_host_key_job(HostKeyJobKind::Trust, alias, host);
                     }
                     Err(error) => {
                         wizard.message = crate::i18n::error_message(&error, wizard.language);
@@ -1076,10 +1270,10 @@ pub async fn attach(
                             Ok(warning) => {
                                 let message = warning.unwrap_or_else(|| match wizard.language {
                                     crate::config::UiLanguage::ZhCn => {
-                                        format!("主机 '{alias}' 已保存并退出。")
+                                        format!("主机 '{alias}' 已覆盖保存并退出。")
                                     }
                                     crate::config::UiLanguage::En => {
-                                        format!("Host '{alias}' saved and exited.")
+                                        format!("Host '{alias}' overwritten and exited.")
                                     }
                                 });
                                 wizard.result = Some(WizardResult {

@@ -43,6 +43,8 @@ pub struct Cli {
     pub sudo: bool,
     #[arg(long)]
     pub overwrite: bool,
+    #[arg(long)]
+    pub retries: Option<u32>,
     #[command(subcommand)]
     action: Option<Action>,
 }
@@ -978,6 +980,10 @@ fn host_key_command(
     language: crate::config::UiLanguage,
 ) -> Result<()> {
     let config = Config::load(&paths.config)?;
+    let retries = cli
+        .retries
+        .unwrap_or(config.settings.retry_attempts)
+        .clamp(1, 10);
     match action {
         HostKeyAction::Status { target } => {
             let status = crate::hostkey::status(&config, &target)?;
@@ -1014,7 +1020,7 @@ fn host_key_command(
         }
         HostKeyAction::Fetch { target } => {
             let resolved = resolve_target(&config, &target)?;
-            let keys = crate::hostkey::fetch(&resolved.host)?;
+            let keys = crate::hostkey::fetch_with_retries(&resolved.host, retries)?;
             let value = serde_json::json!({
                 "host": resolved.alias,
                 "address": resolved.host.hostname.clone().or(resolved.host.ssh_alias.clone()),
@@ -1050,11 +1056,15 @@ fn host_key_command(
         } => {
             let resolved = resolve_target(&config, &target)?;
             if fingerprint.is_none() {
-                let keys = crate::hostkey::fetch(&resolved.host)?;
+                let keys = crate::hostkey::fetch_with_retries(&resolved.host, retries)?;
                 crate::hostkey::confirm_trust_interactively(&keys)?;
             }
-            let result =
-                crate::hostkey::trust(&resolved.alias, &resolved.host, fingerprint.as_deref())?;
+            let result = crate::hostkey::trust_with_retries(
+                &resolved.alias,
+                &resolved.host,
+                fingerprint.as_deref(),
+                retries,
+            )?;
             let human = if result.added.is_empty() {
                 match language {
                     crate::config::UiLanguage::ZhCn => {

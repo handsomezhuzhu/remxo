@@ -31,6 +31,7 @@ timeout_seconds = 30
 max_output = 65536
 allow_overwrite = false
 audit_output = false
+retry_attempts = 3
 language = "zh-CN"
 ```
 
@@ -41,6 +42,7 @@ language = "zh-CN"
 | `max_output` | `65536` | 处理后输出默认字节上限 |
 | `allow_overwrite` | `false` | 与 `--overwrite` 做逻辑 OR |
 | `audit_output` | `false` | 审计输出相关配置项；默认不记录完整 stdout/stderr |
+| `retry_attempts` | `3` | 主机密钥获取/信任的默认重试次数，范围 1–10 |
 | `language` | `"en"` | `en` 或 `zh-CN`；旧配置缺省为英文 |
 
 TUI Settings 页的交互范围与 TOML 校验范围不同：

@@ -65,6 +65,7 @@ Fetch host key → Trust host key
 ```
 
 - `Fetch host key` 自动显示服务器侧指纹，信息区自动换行；
+- TUI 执行主机密钥获取/信任时有旋转指示、耗时和重试次数；
 - 人工核对后，选择 `Trust host key` 并再次按 Enter 确认；
 - 不需要手动粘贴指纹；AI 不得自行 trust 或关闭主机密钥检查。
 

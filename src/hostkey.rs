@@ -7,6 +7,7 @@ use std::fs::OpenOptions;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 const KEYSCAN_TIMEOUT_SECONDS: &str = "10";
 const TRUST_CONFIRMATION: &str = "TRUST";
@@ -96,7 +97,7 @@ pub fn endpoint(host: &Host) -> Result<(String, u16)> {
             .output()
             .map_err(|error| AppError::io("resolve OpenSSH host alias", error))?;
         if !output.status.success() {
-            let detail = crate::redact::escape_controls(&String::from_utf8_lossy(&output.stderr));
+            let detail = crate::redact::external_error_detail(&output.stderr);
             return Err(AppError::new(
                 ErrorCode::ConnectionFailed,
                 format!("cannot resolve OpenSSH alias '{alias}': {}", detail.trim()),
@@ -186,6 +187,33 @@ fn parse_host_key_lines(output: &str) -> Result<Vec<FetchedHostKey>> {
 
 /// Fetch the server host keys without trusting them.
 pub fn fetch(host: &Host) -> Result<Vec<FetchedHostKey>> {
+    fetch_with_retries(host, 1)
+}
+
+/// Fetch host keys with a bounded retry count for transient network failures.
+pub fn fetch_with_retries(host: &Host, retries: u32) -> Result<Vec<FetchedHostKey>> {
+    let attempts = retries.max(1);
+    let mut last_error = None;
+    for attempt in 1..=attempts {
+        match fetch_once(host) {
+            Ok(keys) => return Ok(keys),
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+        if attempt < attempts {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        AppError::new(
+            ErrorCode::ConnectionFailed,
+            "ssh-keyscan returned no host key",
+        )
+    }))
+}
+
+pub(crate) fn fetch_once(host: &Host) -> Result<Vec<FetchedHostKey>> {
     let (address, port) = endpoint(host)?;
     let output = Command::new(keyscan_binary())
         .arg("-p")
@@ -196,10 +224,10 @@ pub fn fetch(host: &Host) -> Result<Vec<FetchedHostKey>> {
         .output()
         .map_err(|error| AppError::io("start ssh-keyscan", error))?;
     if !output.status.success() && output.stdout.is_empty() {
-        let detail = crate::redact::escape_controls(&String::from_utf8_lossy(&output.stderr));
+        let detail = crate::redact::external_error_detail(&output.stderr);
         return Err(AppError::new(
             ErrorCode::ConnectionFailed,
-            format!("ssh-keyscan could not fetch a host key: {}", detail.trim()),
+            format!("ssh-keyscan could not fetch a host key: {detail}"),
         ));
     }
     let keys = parse_host_key_lines(&String::from_utf8_lossy(&output.stdout))?;
@@ -326,8 +354,18 @@ fn append_known_hosts(lines: &[String]) -> Result<PathBuf> {
 /// Trust fetched host keys. `fingerprint` is required for non-interactive use;
 /// interactive confirmation is handled by the caller.
 pub fn trust(alias: &str, host: &Host, fingerprint: Option<&str>) -> Result<HostKeyTrustResult> {
+    trust_with_retries(alias, host, fingerprint, 1)
+}
+
+/// Trust fetched host keys with bounded retries for the fetch step.
+pub fn trust_with_retries(
+    alias: &str,
+    host: &Host,
+    fingerprint: Option<&str>,
+    retries: u32,
+) -> Result<HostKeyTrustResult> {
     let (address, port) = endpoint(host)?;
-    let fetched = fetch(host)?;
+    let fetched = fetch_with_retries(host, retries)?;
     let selected = select_fetched_keys(&fetched, fingerprint)?;
     let known = known_host_keys(host)?;
     let already_known = selected.iter().any(|key| {
@@ -370,13 +408,10 @@ pub fn remove(host: &Host) -> Result<()> {
         .output()
         .map_err(|error| AppError::io("remove OpenSSH host key", error))?;
     if !output.status.success() {
-        let detail = crate::redact::escape_controls(&String::from_utf8_lossy(&output.stderr));
+        let detail = crate::redact::external_error_detail(&output.stderr);
         return Err(AppError::new(
             ErrorCode::IoError,
-            format!(
-                "ssh-keygen could not remove the host key: {}",
-                detail.trim()
-            ),
+            format!("ssh-keygen could not remove the host key: {detail}"),
         ));
     }
     Ok(())

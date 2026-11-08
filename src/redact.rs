@@ -54,6 +54,26 @@ pub fn sanitize(input: &str) -> String {
     escape_controls(&redact(input))
 }
 
+/// Render untrusted external command output for humans without leaking binary
+/// noise or pretending invalid bytes are meaningful text.
+pub fn external_error_detail(bytes: &[u8]) -> String {
+    let lossy = String::from_utf8_lossy(bytes);
+    let mut cleaned = String::with_capacity(lossy.len());
+    let mut in_replacement = false;
+    for character in lossy.chars() {
+        if character == '\u{FFFD}' {
+            if !in_replacement {
+                cleaned.push('?');
+                in_replacement = true;
+            }
+        } else {
+            cleaned.push(character);
+            in_replacement = false;
+        }
+    }
+    escape_controls(&cleaned).trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +95,14 @@ mod tests {
         assert!(!output.contains("json-secret"));
         assert!(!output.contains("url-secret"));
         assert!(output.contains("password"));
+    }
+
+    #[test]
+    fn external_error_detail_replaces_invalid_utf8_without_octal_noise() {
+        // GBK bytes for a Chinese error message; they are not valid UTF-8.
+        let detail = external_error_detail(&[0xd5, 0xe2, 0x21, 0x0a]);
+        assert_eq!(detail, "?!");
+        assert!(!detail.contains("\\325"));
     }
 
     #[test]

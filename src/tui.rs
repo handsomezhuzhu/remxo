@@ -17,6 +17,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState};
 use std::io::{Stdout, stdout};
 use std::time::Duration;
@@ -41,6 +42,7 @@ fn pages(language: crate::config::UiLanguage) -> &'static [&'static str; 7] {
 
 struct App {
     page: usize,
+    page_flash_started: Option<std::time::Instant>,
     selected: usize,
     search: crate::text_input::TextInput,
     searching: bool,
@@ -58,6 +60,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             page: 0,
+            page_flash_started: None,
             selected: 0,
             search: crate::text_input::TextInput::new(256),
             searching: false,
@@ -77,6 +80,21 @@ enum SettingsAction {
     Language,
     Timeout(i64),
     MaxOutput(i64),
+}
+
+fn switch_page(app: &mut App, page: usize) {
+    app.page = page.min(PAGES_EN.len() - 1);
+    app.selected = 0;
+    app.page_flash_started = Some(std::time::Instant::now());
+}
+
+fn page_flash_frame(app: &App) -> Option<usize> {
+    let started = app.page_flash_started?;
+    let elapsed = started.elapsed();
+    if elapsed >= Duration::from_millis(900) {
+        return None;
+    }
+    Some((elapsed.as_millis() / 150) as usize % 3)
 }
 
 fn change_settings(paths: &AppPaths, app: &mut App, action: SettingsAction) -> Result<String> {
@@ -156,6 +174,12 @@ async fn run_loop(
     let _ = client.ensure_running().await;
     let mut last_refresh = std::time::Instant::now() - Duration::from_secs(3);
     loop {
+        if app
+            .page_flash_started
+            .is_some_and(|started| started.elapsed() >= Duration::from_millis(900))
+        {
+            app.page_flash_started = None;
+        }
         if last_refresh.elapsed() >= Duration::from_secs(2) {
             refresh(&client, &mut app).await;
             if let Ok(log) = AuditLog::new(&paths.audit()) {
@@ -221,9 +245,13 @@ async fn run_loop(
             KeyCode::Char('q') => return Ok(()),
             KeyCode::Esc => return Ok(()),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-            KeyCode::Tab | KeyCode::Right => app.page = (app.page + 1) % PAGES_EN.len(),
+            KeyCode::Tab | KeyCode::Right => {
+                let next = (app.page + 1) % PAGES_EN.len();
+                switch_page(&mut app, next);
+            }
             KeyCode::BackTab | KeyCode::Left => {
-                app.page = (app.page + PAGES_EN.len() - 1) % PAGES_EN.len()
+                let next = (app.page + PAGES_EN.len() - 1) % PAGES_EN.len();
+                switch_page(&mut app, next);
             }
             KeyCode::Down if app.page == 0 => {
                 let maximum = config
@@ -267,8 +295,7 @@ async fn run_loop(
                 }
             }
             KeyCode::Char(page @ '1'..='7') => {
-                app.page = (page as usize - '1' as usize).min(PAGES_EN.len() - 1);
-                app.selected = 0;
+                switch_page(&mut app, page as usize - '1' as usize);
             }
             KeyCode::Char('t') if app.page == 0 => {
                 if let Ok(config) = &config {
@@ -460,6 +487,41 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
     ])
     .split(frame.area());
     let page_names = pages(app.language);
+    let flash_frame = page_flash_frame(app);
+    let mut tab_spans = Vec::new();
+    for (index, name) in page_names.iter().enumerate() {
+        let active = index == app.page;
+        let style = if active {
+            match flash_frame {
+                Some(_frame) if app.no_color || std::env::var_os("NO_COLOR").is_some() => {
+                    Style::default().add_modifier(Modifier::BOLD)
+                }
+                Some(_) => Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                None => Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            }
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let marker = if active {
+            match flash_frame {
+                Some(0) => "▶ ",
+                Some(1) => "► ",
+                Some(2) => "▸ ",
+                _ => "● ",
+            }
+        } else {
+            ""
+        };
+        tab_spans.push(Span::styled(format!("{marker}{name}"), style));
+        if index + 1 < page_names.len() {
+            tab_spans.push(Span::raw("  ·  "));
+        }
+    }
     let title = format!(
         " Remxo │ {} │ Vault {} │ L1 ",
         page_names[app.page],
@@ -471,7 +533,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, config: Option<&Config>) {
         }
     );
     frame.render_widget(
-        Paragraph::new(page_names.join("  ·  "))
+        Paragraph::new(Line::from(tab_spans))
             .block(Block::default().borders(Borders::ALL).title(title)),
         columns[0],
     );
