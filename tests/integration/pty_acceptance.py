@@ -580,7 +580,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             self.root,
             "interactive host form",
             [
-                (b"styled", b"\x1b[B\x1b[Bexample.invalid\r\r\r"),
+                (b"styled", b"\x1b[B\x1b[Bexample.invalid" + b"\x1b[B" * 16 + b"\r"),
                 (b"", b"\x1b[B\x1b[B\r"),
             ],
             completion=lambda: (self.original / "audit.jsonl").exists(),
@@ -625,7 +625,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
         keys = (
             b"\x1b[B\x1b[B"
             + b"\x1b[H\x1b[3~\x1b[F.new"
-            + b"\x1b[B" * 15
+            + b"\x1b[B" * 18
             + b"\r"
         )
         result = PtyCommand(
@@ -683,7 +683,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             + b"\x1b[C" * 2
             + b"\x1b[B" * 8
             + SSH_PASSWORD.encode("ascii")
-            + b"\x1b[B" * 2
+            + b"\x1b[B" * 5
             + b"\r"
         )
         result = PtyCommand(
@@ -760,7 +760,8 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             + b"\x1b[C" * 3
             + b"\x1b[B" * 9
             + b"id_test_only"
-            + b"\x1b[B\r"
+            + b"\x1b[B" * 4
+            + b"\r"
         )
         result = PtyCommand(
             self.binary,

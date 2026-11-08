@@ -58,10 +58,13 @@ impl ConnectionMode {
     }
 }
 
-const ACTION_TEST_OR_SAVE_TEST: usize = 15;
-const ACTION_SAVE: usize = 16;
-const ACTION_SAVE_EXIT: usize = 17;
-const ACTION_EXIT: usize = 18;
+const HOST_KEY_FINGERPRINT: usize = 15;
+const ACTION_FETCH_HOST_KEY: usize = 16;
+const ACTION_TRUST_HOST_KEY: usize = 17;
+const ACTION_TEST_OR_SAVE_TEST: usize = 18;
+const ACTION_SAVE: usize = 19;
+const ACTION_SAVE_EXIT: usize = 20;
+const ACTION_EXIT: usize = 21;
 const LAST_FOCUS: usize = ACTION_EXIT;
 
 struct Draft {
@@ -74,6 +77,7 @@ struct Draft {
     auth: AuthMode,
     ssh_password: Option<TextInput>,
     private_key_path: TextInput,
+    host_key_fingerprint: TextInput,
     environment: TextInput,
     tags: Vec<String>,
     platform: Platform,
@@ -132,6 +136,7 @@ impl Draft {
             auth: initial.auth,
             ssh_password: None,
             private_key_path: TextInput::new(512),
+            host_key_fingerprint: TextInput::new(256),
             environment: input(
                 if initial.environment.is_empty() {
                     "development".into()
@@ -357,6 +362,19 @@ impl Draft {
                     self.private_key_path.value().to_string()
                 }
             }
+            15 => {
+                let value = self.host_key_fingerprint.value().trim();
+                if value.is_empty() {
+                    language
+                        .text(
+                            "paste SHA256:... after verifying out-of-band",
+                            "人工核对后粘贴 SHA256:...",
+                        )
+                        .into()
+                } else {
+                    value.to_string()
+                }
+            }
             _ => String::new(),
         }
     }
@@ -415,6 +433,7 @@ impl Draft {
             7 => Some(&self.environment),
             13 => self.ssh_password.as_ref(),
             14 => Some(&self.private_key_path),
+            15 => Some(&self.host_key_fingerprint),
             _ => None,
         }
     }
@@ -432,6 +451,7 @@ impl Draft {
             7 => Some(&mut self.environment),
             13 => self.ssh_password.as_mut(),
             14 => Some(&mut self.private_key_path),
+            15 => Some(&mut self.host_key_fingerprint),
             _ => None,
         }
     }
@@ -553,6 +573,8 @@ struct Wizard {
     language: crate::config::UiLanguage,
     result: Option<WizardResult>,
     exit_prompt: bool,
+    host_keys: Vec<crate::hostkey::FetchedHostKey>,
+    host_key_trusted: bool,
     client: BrokerClient,
     original: Option<Host>,
 }
@@ -601,6 +623,8 @@ impl Wizard {
             language,
             result: None,
             exit_prompt: false,
+            host_keys: Vec::new(),
+            host_key_trusted: false,
             original,
         })
     }
@@ -658,8 +682,10 @@ impl Wizard {
             KeyCode::Enter => {
                 if self.focused < 6 {
                     self.focused = 6;
-                } else if self.focused < 15 {
-                    self.focused = 15;
+                } else if self.focused < HOST_KEY_FINGERPRINT {
+                    self.focused = HOST_KEY_FINGERPRINT;
+                } else if self.focused < ACTION_FETCH_HOST_KEY {
+                    self.focused = ACTION_FETCH_HOST_KEY;
                 }
             }
             _ => {}
@@ -668,6 +694,8 @@ impl Wizard {
 
     fn action(&mut self) -> Action {
         match self.focused {
+            ACTION_FETCH_HOST_KEY => Action::FetchHostKey,
+            ACTION_TRUST_HOST_KEY => Action::TrustHostKey,
             ACTION_TEST_OR_SAVE_TEST if self.original.is_some() => Action::SaveTest,
             ACTION_TEST_OR_SAVE_TEST => Action::Test,
             ACTION_SAVE => Action::Save,
@@ -685,6 +713,8 @@ enum Action {
     SaveTest,
     SaveExit,
     Exit,
+    FetchHostKey,
+    TrustHostKey,
 }
 
 async fn save_host(
@@ -830,7 +860,151 @@ pub async fn attach(
             continue;
         }
         match key.code {
-            KeyCode::Enter if wizard.focused >= ACTION_TEST_OR_SAVE_TEST => match wizard.action() {
+            KeyCode::Enter if wizard.focused >= ACTION_FETCH_HOST_KEY => match wizard.action() {
+                Action::FetchHostKey => match wizard.draft.host() {
+                    Ok((_alias, host)) => match crate::hostkey::fetch(&host) {
+                        Ok(keys) => {
+                            wizard.host_keys = keys.clone();
+                            wizard.host_key_trusted = false;
+                            let expected = wizard.draft.host_key_fingerprint.value().trim();
+                            let fingerprints = keys
+                                .iter()
+                                .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            if expected.is_empty() {
+                                wizard.message = match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => format!(
+                                        "服务器主机密钥指纹：{fingerprints}。请人工核对后粘贴到“主机密钥指纹”，再选择“信任主机密钥”。"
+                                    ),
+                                    crate::config::UiLanguage::En => format!(
+                                        "Server host key fingerprints: {fingerprints}. Verify out-of-band, paste it into Host key fingerprint, then choose Trust host key."
+                                    ),
+                                };
+                            } else if keys.iter().any(|key| key.fingerprint == expected) {
+                                wizard.message = match wizard.language {
+                                        crate::config::UiLanguage::ZhCn => {
+                                            "指纹与服务器一致。确认已人工核对后，选择“信任主机密钥”。".to_string()
+                                        }
+                                        crate::config::UiLanguage::En => {
+                                            "Fingerprint matches the server. After out-of-band verification, choose Trust host key."
+                                                .to_string()
+                                        }
+                                    };
+                            } else {
+                                wizard.message = match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => format!(
+                                        "指纹不匹配。服务器指纹：{fingerprints}；你粘贴的是：{expected}。"
+                                    ),
+                                    crate::config::UiLanguage::En => format!(
+                                        "Fingerprint mismatch. Server: {fingerprints}; pasted: {expected}."
+                                    ),
+                                };
+                            }
+                            wizard.failed = false;
+                            wizard.tested = false;
+                        }
+                        Err(error) => {
+                            wizard.message = crate::i18n::error_message(&error, wizard.language);
+                            wizard.failed = true;
+                            wizard.tested = false;
+                        }
+                    },
+                    Err(error) => {
+                        wizard.message = crate::i18n::error_message(&error, wizard.language);
+                        wizard.failed = true;
+                        wizard.tested = false;
+                    }
+                },
+                Action::TrustHostKey => match wizard.draft.host() {
+                    Ok((alias, host)) => {
+                        let expected = wizard.draft.host_key_fingerprint.value().trim();
+                        if wizard.host_keys.is_empty() {
+                            wizard.message = match wizard.language {
+                                crate::config::UiLanguage::ZhCn => {
+                                    "请先选择“获取主机密钥”。".to_string()
+                                }
+                                crate::config::UiLanguage::En => {
+                                    "Choose Fetch host key first.".to_string()
+                                }
+                            };
+                            wizard.failed = true;
+                            wizard.tested = false;
+                            continue;
+                        }
+                        if expected.is_empty() {
+                            wizard.message = match wizard.language {
+                                crate::config::UiLanguage::ZhCn => {
+                                    "请先粘贴人工核对后的主机密钥指纹。".to_string()
+                                }
+                                crate::config::UiLanguage::En => {
+                                    "Paste the verified host key fingerprint first.".to_string()
+                                }
+                            };
+                            wizard.failed = true;
+                            wizard.tested = false;
+                            continue;
+                        }
+                        if !wizard
+                            .host_keys
+                            .iter()
+                            .any(|key| key.fingerprint == expected)
+                        {
+                            wizard.message = match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => {
+                                        "粘贴的指纹与获取到的服务器指纹不一致，未信任。".to_string()
+                                    }
+                                    crate::config::UiLanguage::En => {
+                                        "Pasted fingerprint does not match the fetched host key; not trusted."
+                                            .to_string()
+                                    }
+                                };
+                            wizard.failed = true;
+                            wizard.tested = false;
+                            continue;
+                        }
+                        match crate::hostkey::trust(&alias, &host, Some(expected)) {
+                            Ok(result) => {
+                                wizard.host_key_trusted = true;
+                                wizard.message = match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => {
+                                        if result.added.is_empty() {
+                                            format!(
+                                                "主机 '{}' 的主机密钥已在 known_hosts 中。",
+                                                alias
+                                            )
+                                        } else {
+                                            format!("主机 '{}' 的主机密钥已信任。", alias)
+                                        }
+                                    }
+                                    crate::config::UiLanguage::En => {
+                                        if result.added.is_empty() {
+                                            format!(
+                                                "Host '{}' key is already in known_hosts.",
+                                                alias
+                                            )
+                                        } else {
+                                            format!("Host '{}' key trusted.", alias)
+                                        }
+                                    }
+                                };
+                                wizard.failed = false;
+                                wizard.tested = false;
+                            }
+                            Err(error) => {
+                                wizard.message =
+                                    crate::i18n::error_message(&error, wizard.language);
+                                wizard.failed = true;
+                                wizard.tested = false;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        wizard.message = crate::i18n::error_message(&error, wizard.language);
+                        wizard.failed = true;
+                        wizard.tested = false;
+                    }
+                },
                 Action::Test => match wizard.draft.host() {
                     Ok((alias, host)) => {
                         let precondition = crate::host::check_can_add(paths, &alias, &host);
@@ -1284,10 +1458,16 @@ fn label(index: usize, language: crate::config::UiLanguage) -> &'static str {
         12 => language.text("Acknowledge insecure Telnet", "确认 Telnet 不加密风险"),
         13 => language.text("SSH password / key passphrase", "SSH 密码 / 私钥口令"),
         14 => language.text("Private key file (not .pub)", "私钥文件（不是 .pub）"),
-        15 => language.text("[ Test connection ]", "[ 测试连接 ]"),
-        16 => language.text("[ Save ]", "[ 保存 ]"),
-        17 => language.text("[ Save & exit ]", "[ 保存并退出 ]"),
-        18 => language.text("[ Exit ]", "[ 退出 ]"),
+        15 => language.text(
+            "Host key fingerprint (paste after verifying)",
+            "主机密钥指纹（核对后粘贴）",
+        ),
+        16 => language.text("[ Fetch host key ]", "[ 获取主机密钥 ]"),
+        17 => language.text("[ Trust host key ]", "[ 信任主机密钥 ]"),
+        18 => language.text("[ Test connection ]", "[ 测试连接 ]"),
+        19 => language.text("[ Save ]", "[ 保存 ]"),
+        20 => language.text("[ Save & exit ]", "[ 保存并退出 ]"),
+        21 => language.text("[ Exit ]", "[ 退出 ]"),
         _ => "",
     }
 }
@@ -1296,8 +1476,8 @@ fn field_label(wizard: &Wizard, index: usize) -> &'static str {
     match (wizard.original.is_some(), index, wizard.language) {
         (true, 0, crate::config::UiLanguage::En) => "Alias (fixed)",
         (true, 0, crate::config::UiLanguage::ZhCn) => "主机别名（固定）",
-        (true, 15, crate::config::UiLanguage::En) => "[ Save & test ]",
-        (true, 15, crate::config::UiLanguage::ZhCn) => "[ 保存并测试 ]",
+        (true, 18, crate::config::UiLanguage::En) => "[ Save & test ]",
+        (true, 18, crate::config::UiLanguage::ZhCn) => "[ 保存并测试 ]",
         _ => label(index, wizard.language),
     }
 }
@@ -1512,6 +1692,18 @@ fn draw_preview(frame: &mut ratatui::Frame, wizard: &Wizard, area: ratatui::layo
             "port: {} · host number: {}",
             wizard.draft.port.value(),
             wizard.draft.number.value()
+        )),
+        Line::from(format!(
+            "host key: {}",
+            if wizard.host_key_trusted {
+                wizard.language.text("trusted", "已信任")
+            } else if wizard.host_keys.is_empty() {
+                wizard.language.text("not fetched", "未获取")
+            } else {
+                wizard
+                    .language
+                    .text("fetched; verify then trust", "已获取；请核对后信任")
+            }
         )),
         Line::from(format!(
             "environment: {} · platform: {:?}",
@@ -1772,7 +1964,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("config: {error}"));
         let mut wizard = Wizard::new(&paths, Some("prod-01".into()), None, false)
             .unwrap_or_else(|error| panic!("wizard: {error}"));
-        wizard.focused = 16;
+        wizard.focused = 19;
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 36))
             .unwrap_or_else(|error| panic!("terminal: {error}"));
         terminal
@@ -1786,6 +1978,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         let compact = content.replace(' ', "");
+        assert!(compact.contains("获取主机密钥"));
+        assert!(compact.contains("信任主机密钥"));
         assert!(compact.contains("测试连接"));
         assert!(compact.contains("保存"));
         assert!(compact.contains("保存并退出"));
@@ -1812,18 +2006,28 @@ mod tests {
             false,
         )
         .unwrap_or_else(|error| panic!("wizard: {error}"));
-        assert_eq!(field_label(&wizard, 15), "[ Save & test ]");
-        assert_eq!(field_label(&wizard, 16), "[ Save ]");
-        assert_eq!(field_label(&wizard, 17), "[ Save & exit ]");
-        assert_eq!(field_label(&wizard, 18), "[ Exit ]");
+        assert_eq!(
+            field_label(&wizard, 15),
+            "Host key fingerprint (paste after verifying)"
+        );
+        assert_eq!(field_label(&wizard, 16), "[ Fetch host key ]");
+        assert_eq!(field_label(&wizard, 17), "[ Trust host key ]");
+        assert_eq!(field_label(&wizard, 18), "[ Save & test ]");
+        assert_eq!(field_label(&wizard, 19), "[ Save ]");
+        assert_eq!(field_label(&wizard, 20), "[ Save & exit ]");
+        assert_eq!(field_label(&wizard, 21), "[ Exit ]");
 
-        wizard.focused = 15;
-        assert!(matches!(wizard.action(), Action::SaveTest));
         wizard.focused = 16;
-        assert!(matches!(wizard.action(), Action::Save));
+        assert!(matches!(wizard.action(), Action::FetchHostKey));
         wizard.focused = 17;
-        assert!(matches!(wizard.action(), Action::SaveExit));
+        assert!(matches!(wizard.action(), Action::TrustHostKey));
         wizard.focused = 18;
+        assert!(matches!(wizard.action(), Action::SaveTest));
+        wizard.focused = 19;
+        assert!(matches!(wizard.action(), Action::Save));
+        wizard.focused = 20;
+        assert!(matches!(wizard.action(), Action::SaveExit));
+        wizard.focused = 21;
         assert!(matches!(wizard.action(), Action::Exit));
 
         wizard.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1842,7 +2046,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("wizard: {error}"));
         wizard.draft.address = TextInput::with_value("example.invalid", 256)
             .unwrap_or_else(|error| panic!("address: {error}"));
-        wizard.focused = 16;
+        wizard.focused = 19;
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(96, 36))
             .unwrap_or_else(|error| panic!("terminal: {error}"));
         terminal
@@ -1857,6 +2061,8 @@ mod tests {
             .collect::<String>();
         assert!(content.contains("prod-01"));
         assert!(content.contains("Connection"));
+        assert!(content.contains("Fetch host key"));
+        assert!(content.contains("Trust host key"));
         assert!(content.contains("Test connection"));
         assert!(content.contains("Save"));
         assert!(content.contains("Save & exit"));

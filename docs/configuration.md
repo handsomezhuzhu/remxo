@@ -176,7 +176,7 @@ Alias → Connection → Address → Username → Port →
 Auth → Number → Environment → Platform →
 Raw → Approval → sudo → Telnet ack →
 SSH password/passphrase → Private key →
-Test connection / Save / Save & test / Save & exit / Exit
+Host key fingerprint / Fetch host key / Trust host key / Test connection / Save / Save & test / Save & exit / Exit
 ```
 
 新建向导的编号默认是当前最大编号 +1；空 environment 显示 `development`；shell 由 platform 推导（Windows→PowerShell，Other→Custom，其余 POSIX）。
