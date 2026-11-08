@@ -431,3 +431,65 @@ mod unix {
         assert!(!marker.exists());
     }
 }
+
+#[cfg(windows)]
+mod windows {
+    use remxo::broker::{BrokerClient, RpcPayload, RpcRequest};
+    use remxo::config::{AppPaths, Config};
+    use remxo::vault::VaultSession;
+
+    #[tokio::test]
+    async fn cli_reuses_unlocked_broker_after_the_invoking_process_exits() {
+        let directory = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|e| panic!("paths: {e}"));
+        Config::initialize_with_language(&paths.config, remxo::config::UiLanguage::ZhCn)
+            .unwrap_or_else(|e| panic!("initialize config: {e}"));
+        VaultSession::initialize(&paths.vault(), "test-only-broker-lifecycle")
+            .unwrap_or_else(|e| panic!("initialize vault: {e}"));
+
+        let first = std::process::Command::new(env!("CARGO_BIN_EXE_remxo"))
+            .arg("--config")
+            .arg(&paths.config)
+            .args(["task", "list"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("first CLI process: {e}"));
+        let status = first
+            .wait_with_output()
+            .unwrap_or_else(|e| panic!("wait for first CLI: {e}"));
+        assert!(status.status.success(), "first terminal process failed");
+
+        let client = BrokerClient::new(paths.clone());
+        let mut running = None;
+        for _ in 0..40 {
+            if let Ok(RpcPayload::Status(status)) = client.call(RpcRequest::Status).await {
+                running = Some(status);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let status = running.unwrap_or_else(|| panic!("broker did not survive the first CLI exit"));
+        assert!(status.broker_running);
+        assert!(status.vault_locked);
+        let _ = client
+            .call(RpcRequest::Unlock {
+                password: "test-only-broker-lifecycle".into(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("test-only unlock failed: {error}"));
+        let second = BrokerClient::new(paths.clone());
+        let RpcPayload::Status(refreshed) = second
+            .call(RpcRequest::Status)
+            .await
+            .unwrap_or_else(|error| panic!("second terminal query: {error}"))
+        else {
+            panic!("unexpected status response")
+        };
+        assert!(refreshed.broker_running);
+        assert!(!refreshed.vault_locked);
+        let _ = second.call(RpcRequest::Shutdown).await;
+    }
+}

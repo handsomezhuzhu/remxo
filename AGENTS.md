@@ -26,7 +26,7 @@
 - 使用单个 Cargo 包；保持现有模块边界，最小变更，不为未来阶段提前伪造实现。
 - Rust MSRV 为 1.88；禁止 unsafe，秘密内存使用 zeroize 降低残留但不夸大保证。
 - 安全判断失败必须 fail closed；不关闭 OpenSSH 主机密钥检查，不新增秘密 CLI 参数，不增加默认自动解锁或写重试。
-- 自动 Broker 的 Unix daemon 分离必须在 Tokio 启动线程前完成，禁止在 async runtime 中 fork；保留 PTY 关闭后 Broker 存活和 Vault 状态的回归测试。
+- 自动 Broker 的 Unix daemon 分离必须在 Tokio 启动线程前完成，禁止在 async runtime 中 fork；保留 PTY 关闭后 Broker 存活和 Vault 状态的回归测试。Windows 使用 detached process + new process group + no-window 方式脱离终端并控制管道继承，必须用独立客户端测试第二次查询，避免读取输出 EOF 将测试阻塞误判为后台退出。
 - 隧道不得用固定 sleep 或 bind 前的 `Local forwarding listening on` 预告判定启动成功；等待完整交互初始化并确认子进程仍存活，失败/超时结束本地进程，调试 stderr 不进入日志或 AI 输出。
 - OpenSSH/scp/sftp 使用 argv，不用本地 shell 拼接。POSIX 引用不能套用到其他 shell。
 - `openssh-config`/`external-agent` 非交互保持 `BatchMode=yes`；仅 Vault 模式使用 `BatchMode=no` + `SSH_ASKPASS_REQUIRE=force` + `NumberOfPasswordPrompts=1`。不得给 Vault 认证增加隐式密码重试或错误身份回退。
@@ -34,7 +34,7 @@
 - 正常认证由 Broker 从登记 Host 重新解析名称与 kind；pending Host 只用于未保存 wizard test，已保存 alias 必须拒绝 pending 替代。`SecretForAuth` 可返回单条带类型 Secret，不得据此声称“RPC 只返回操作结果/从不导出秘密”，也不得扩展成完整 Vault 导出；L1 不抵抗恶意同用户。
 - Vault 记录新约定为 `<alias>:ssh`（SSH 密码/私钥口令）、`<alias>:key`（私钥）、`<alias>:sudo`（独立 sudo）。无 `sudo_credential` 的 Host（包括旧 Host）保留裸 `<alias>` sudo 查找兼容，类型检查不得放宽。公共 CLI 为 `vault set-ssh-password` / `vault import-key` / `vault set-sudo`。
 - 私钥导入仅接受常规文件、拒绝 symlink，限制 1 MiB，支持 OpenSSH/RSA/EC/PKCS#8 PEM 形状；marker 校验不冒充真实认证。私钥仅以受 guard 管理的受限临时文件交给 OpenSSH，并统一由 `prepare_authentication` 覆盖 exec/task、TUI interactive SSH、SCP/SFTP 和 tunnel；正常结束清理，不承诺崩溃清理或安全擦除。
-- exec/task/传输/隧道共享认证准备时，必须保留临时 key 至子进程/隧道生命周期结束。Windows 原生 ACL 与真实认证未验证前，不得把 Unix `0600` 或 Linux 结果写成跨平台通过。
+- exec/task/传输/隧道共享认证准备时，必须保留临时 key 至子进程/隧道生命周期结束。Windows 已验证独立 ACE 权限和 CLI/客户端生命周期复用；不得把 Unix `0600` 或 Linux 结果写成跨平台通过，也不得把输出管道继承引起 EOF 阻塞误判为 Broker 退出。Windows 密码认证、完整 ConPTY 与其它全部认证矩阵仍未覆盖。
 - 配置/Vault/备份 schema 保持严格校验；新字段必须考虑迁移、备份范围、秘密与权限。新密码在写入任何配置或 Vault 前验证；初始化允许仅恢复“有效配置存在但 Vault 缺失”的半初始化状态，不能覆盖已有配置或 Vault。
 - `settings.language` 仅 `en|zh-CN`，旧配置默认 `en`。支持 `init --lang en|zh-CN`；TTY 无参数可用编号 `1`/`2` 或语言名称选择，空输入默认英文，JSON/非 TTY 不强制语言提示但隐藏主密码仍需要 TTY。恢复已有有效配置必须保留其语言；`unlock` 的掩码提示与成功消息、主 TUI/向导维护中英标签，不借此宣称所有 CLI 已翻译。
 - 主机注册必须同时服务 CLI 和 TUI 表单并保持共享验证与原子保存。交互式向导不在非 TTY / `--json` 下启动；密码/口令不进入表单预览，私钥路径是可见非秘密字段且不保存到 Host；`--no-color` 与环境变量 `NO_COLOR` 默认关闭套色。共享 `text_input` 维护真实光标、Unicode 宽度和有界粘贴；秘密提示保持终端 ECHO 关闭，仅本地显示 `*` 掩码，秘密值、ASKPASS stdout、Secret RPC 不得进入终端记录、审计或测试输出。

@@ -390,6 +390,16 @@ fn dynamic_chinese(code: ErrorCode, message: &str) -> Option<String> {
                     .to_string(),
             );
         }
+        ErrorCode::AuthenticationFailed if message.starts_with("OpenSSH authentication failed") => {
+            let details = message
+                .strip_prefix(
+                    "OpenSSH authentication failed. Remxo does not retry or request credentials from an agent. OpenSSH diagnostic: ",
+                )
+                .unwrap_or(message);
+            return Some(format!(
+                "OpenSSH 认证失败，可能涉及账号、凭据、私钥读取、私钥口令或服务器授权。请检查用户名和私钥/口令，并确认服务器 authorized_keys 中有对应公钥。Remxo 未自动重试或回退到其他身份。以下为已脱敏的原始诊断（未保证逐句翻译）：{details}"
+            ));
+        }
         _ => {}
     }
     None
@@ -629,6 +639,17 @@ mod tests {
 
         let output = localized(ErrorCode::PolicyDenied, "");
         assert_eq!(output, "操作被策略拒绝");
+    }
+
+    #[test]
+    fn localized_auth_failure_preserves_publickey_hint_and_diagnostic() {
+        let error = AppError::new(
+            ErrorCode::AuthenticationFailed,
+            "OpenSSH authentication failed. Remxo does not retry or request credentials from an agent. OpenSSH diagnostic: ubuntu@example: Permission denied (publickey).",
+        );
+        let localized = error_message(&error, crate::config::UiLanguage::ZhCn);
+        assert!(localized.contains("authorized_keys"));
+        assert!(localized.contains("Permission denied (publickey)"));
     }
 
     #[test]

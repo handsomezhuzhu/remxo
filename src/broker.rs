@@ -1020,6 +1020,15 @@ pub struct BrokerClient {
     paths: AppPaths,
 }
 
+#[cfg(windows)]
+const DETACHED_BROKER_CREATION_FLAGS: u32 = 0x00000008 | 0x00000200 | 0x08000000;
+
+#[cfg(windows)]
+fn detach_broker_from_terminal(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(DETACHED_BROKER_CREATION_FLAGS);
+}
+
 impl BrokerClient {
     pub fn new(paths: AppPaths) -> Self {
         Self { paths }
@@ -1031,13 +1040,17 @@ impl BrokerClient {
         }
         let executable =
             std::env::current_exe().map_err(|e| AppError::io("locate Remxo executable", e))?;
-        std::process::Command::new(executable)
+        let mut daemon = std::process::Command::new(executable);
+        daemon
             .arg("--config")
             .arg(&self.paths.config)
             .arg("__broker-daemon")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        detach_broker_from_terminal(&mut daemon);
+        daemon
             .spawn()
             .map_err(|e| AppError::io("start local broker", e))?;
         for _ in 0..100 {
@@ -1137,5 +1150,11 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("read: {error}"));
         assert_eq!(accepted.as_str(), "{\"method\":\"ping\"}\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn broker_detaches_windows_console_and_process_group() {
+        assert_eq!(DETACHED_BROKER_CREATION_FLAGS, 0x08000208);
     }
 }

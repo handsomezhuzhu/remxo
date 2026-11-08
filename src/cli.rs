@@ -55,7 +55,10 @@ enum Action {
     },
     Status,
     Unlock,
-    Lock,
+    Lock {
+        #[arg(long)]
+        stop_broker: bool,
+    },
     Tui,
     Doctor {
         target: Option<String>,
@@ -438,15 +441,29 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
                 ),
             )?;
         }
-        Some(Action::Lock) => {
+        Some(Action::Lock { stop_broker }) => {
             let client = BrokerClient::new(paths);
             if client.ping().await.is_ok() {
-                expect_ack(client.call(RpcRequest::Lock).await?)?;
+                if stop_broker {
+                    expect_ack(client.call(RpcRequest::Shutdown).await?)?;
+                } else {
+                    expect_ack(client.call(RpcRequest::Lock).await?)?;
+                }
             }
             emit(
-                &serde_json::json!({"vault_locked": true}),
+                &serde_json::json!({
+                    "vault_locked": true,
+                    "broker_shutdown_requested": stop_broker
+                }),
                 cli.json,
-                language.text("Vault locked.", "Vault 已锁定。"),
+                if stop_broker {
+                    language.text(
+                        "Vault locked; Broker shutdown acknowledged.",
+                        "Vault 已锁定；Broker 已确认关闭。",
+                    )
+                } else {
+                    language.text("Vault locked.", "Vault 已锁定。")
+                },
             )?;
         }
         Some(Action::Hosts) => {
@@ -1510,6 +1527,22 @@ mod tests {
             Some(crate::config::UiLanguage::ZhCn)
         );
         assert!(parse_language_choice("3").is_err());
+    }
+
+    #[test]
+    fn lock_defaults_to_preserving_broker_until_shutdown_is_explicit() {
+        let cli = Cli::try_parse_from(["remxo", "lock"]).unwrap_or_else(|e| panic!("lock: {e}"));
+        assert!(matches!(
+            cli.action,
+            Some(Action::Lock { stop_broker: false })
+        ));
+
+        let cli = Cli::try_parse_from(["remxo", "lock", "--stop-broker"])
+            .unwrap_or_else(|e| panic!("stop broker: {e}"));
+        assert!(matches!(
+            cli.action,
+            Some(Action::Lock { stop_broker: true })
+        ));
     }
 
     #[test]

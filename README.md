@@ -60,7 +60,7 @@ On Linux, run the self-contained fake, PTY, and optional Docker/real-sshd suites
 python3 tests/run_all.py
 ```
 
-See [TESTING.md](TESTING.md) for test layers, cleanup rules, environment requirements, and current verification limits. On 2026-11-08 this working tree passed Windows native Clippy, all-target Rust tests, and build, plus the complete Linux `python3 tests/run_all.py` suite on an isolated Instabox machine (fake, six PTY cases including numeric Chinese init/localized unlock, masked input, cursor-based host editing and saved-Host `doctor`, real SSH/SFTP/tunnel/task checks, Vault-password/encrypted-key exec and SCP, sudo, and cleanup). These results do not establish Windows native ACL/real Vault authentication, every Vault task/tunnel/interactive path, crash cleanup, credential-rotation failures, or universal server compatibility.
+See [TESTING.md](TESTING.md) for test layers, cleanup rules, environment requirements, and current verification limits. On 2026-11-08 this working tree passed Windows native Clippy, all-target Rust tests, and build, plus the complete Linux `python3 tests/run_all.py` suite on an isolated Instabox machine (fake, six PTY cases including numeric Chinese init/localized unlock, masked input, cursor-based host editing and saved-Host `doctor`, real SSH/SFTP/tunnel/task checks, Vault-password/encrypted-key exec and SCP, sudo, and cleanup). These do not establish every Windows authentication scenario, every Vault task/tunnel/interactive path, crash cleanup, credential-rotation failures, or universal server compatibility. Windows ACL and an independent Broker-reuse lifecycle case were also exercised.
 
 `REMXO_SSH` and `REMXO_SCP` may point to isolated test fakes. Never point them at an untrusted program for a real host.
 
@@ -100,6 +100,12 @@ In `openssh-config`/`external-agent` modes, no command on a TTY opens interactiv
 A human should perform first-use host-key verification in advance. Remxo never adds `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`, or `ForwardAgent=yes`.
 
 `remxo doctor [alias]` first validates local configuration and explicitly, on request, probes one saved Host with a bounded POSIX `true` handshake through the same authentication preparation. It reports the result without weakening host-key checks or issuing a write command; it is not an automatic background health monitor.
+
+## Vault unlock and terminal lifetime
+
+Unlock decrypts the VaultSession **inside the local Broker process**, not inside one PowerShell window. Later CLI invocations from other terminals reuse that Broker's in-memory session; `vault.json` remains encrypted. Closing a completed CLI invocation or its terminal does not by itself clear the DEK. `remxo status` is the reliable way to check `vault_locked` and `broker_running` in a second terminal.
+
+The Windows launcher starts Broker with `DETACHED_PROCESS`, `CREATE_NEW_PROCESS_GROUP`, and `CREATE_NO_WINDOW`, so the background Broker is not tied to the console process group that launched it. Unix daemon separation before Tokio creation provides the equivalent lifecycle. Unlock state is intentionally lost when the Broker exits, locks, crashes, or the OS restarts. `remxo lock` locks the session, while `remxo lock --stop-broker` additionally requests Broker shutdown for upgrades or an intentional restart. A different `--config` directory or a different OS user has a different Vault/Broker lifecycle; there is no shared plaintext master password in the environment or a saved plaintext session file.
 
 ## SSH authentication and Vault credentials
 
@@ -245,7 +251,7 @@ Remote output is untrusted data. Redaction and control-character handling reduce
 - Only POSIX noninteractive command composition is supported. PowerShell, CMD, device/custom shells return explicit unsupported errors rather than receiving POSIX quoting.
 - The TUI supports monitoring, search, host add/edit/connection-test, lock/unlock, and interactive SSH; host remove wizards and TUI approval/backup operations remain future work. Settings supports language, timeout, and max-output changes with atomic configuration saves.
 - Tasks do not resume after Broker restart. Remote-detached execution, connection reuse, and universal SSH-server compatibility are not implemented or proven.
-- Native Windows permission hardening and real Vault password/private-key authentication have not been verified. Unix temporary-file `0600` behavior must not be presented as validated Windows ACL behavior or cross-platform authentication support.
+- Windows has scoped native ACE tests proving current-user-only private-key file access and a second-client broker-lifecycle test. Real password authentication, the complete ConPTY matrix, crash cleanup and all Vault operation variants are not established. Unix `0600` must not be presented as cross-platform proof.
 - Biometric unlock, Linux Secret Service, TPM, an L2 separate-OS-user Broker, and L3 short-lived certificates/central authorization are not implemented.
 
 Architecture is documented in [ARCHITECTURE.md](ARCHITECTURE.md), security verification in [TESTING.md](TESTING.md), and AI development/usage rules in [AGENTS.md](AGENTS.md).

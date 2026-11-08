@@ -467,10 +467,10 @@ fn classify_ssh_failure(stderr: &str) -> AppError {
             "OpenSSH host key verification failed. Remxo never disables host key checks; a human must verify the host key."
                 .to_string()
         }
-        ErrorCode::AuthenticationFailed => {
-            "OpenSSH authentication failed. Remxo does not retry or request credentials from an agent."
-                .to_string()
-        }
+        ErrorCode::AuthenticationFailed => format!(
+            "OpenSSH authentication failed. Remxo does not retry or request credentials from an agent. OpenSSH diagnostic: {}",
+            stderr.trim()
+        ),
         _ => format!("OpenSSH connection failed: {}", stderr.trim()),
     };
     AppError::new(code, message)
@@ -672,5 +672,12 @@ mod tests {
             classify_ssh_failure("Host key verification failed.").code,
             ErrorCode::HostKeyFailed
         );
+    }
+
+    #[test]
+    fn authentication_failure_keeps_the_sanitized_ssh_diagnostic() {
+        let error = classify_ssh_failure("ubuntu@example: Permission denied (publickey).");
+        assert_eq!(error.code, ErrorCode::AuthenticationFailed);
+        assert!(error.message.contains("Permission denied (publickey)"));
     }
 }

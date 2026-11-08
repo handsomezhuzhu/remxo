@@ -52,7 +52,7 @@ Broker RPC 的 `SecretForAuth` 可以有单个 `Secret { kind, value }` 响应�
 
 导入只接受常规文件，拒绝 symlink、目录和特殊文件，限制为 1 MiB，并要求 ASCII 文本的第一个 PEM marker 为 OpenSSH、RSA、EC 或 PKCS#8 `PRIVATE KEY`。该校验只限制文件形状，不证明密钥可被 OpenSSH 解析、能解锁、属于预期账号或能完成认证。源路径是可见的非秘密参数/字段，不写进 Host；源文件不会被删除或清空。
 
-Vault 私钥仅在 OpenSSH 需要时通过单 Secret RPC 取出，并写入数据目录 `runtime` 下的受管临时文件。guard 持续至 exec/task/交互进程结束或 tunnel guard 销毁，正常 drop 删除文件。Unix 上临时文件设置为 `0600`；当前非 Unix 文件限制 helper 并未建立等价 Windows ACL，Windows 原生权限与真实 Vault 认证尚未验证。强制终止、崩溃、文件系统行为或权限错误可能阻止清理；普通文件删除不是安全擦除保证。
+Vault 私钥仅在 OpenSSH 需要时通过单 Secret RPC 取出，并写入数据目录 `runtime` 下的受管临时文件。guard 持续至 exec/task/交互进程结束或 tunnel guard 销毁，正常 drop 删除文件。Unix 上临时文件设置为 `0600`；Windows 使用新建 `FileSecurity` 明确关闭继承、清除旧 ACE，并只授权当前用户 FullControl，不启用 StrictModes=no，另有独立原生 ACE fixture 验证严格权限而不是只测试文件可读。Windows 后台 Broker 使用独立控制台/process group，解锁会话由其它客户端继续复用。强制终止、崩溃、文件系统行为或权限错误可能阻止清理；普通文件删除不是安全擦除保证。
 
 密码/口令明文存在于 Broker/客户端相关进程内存和同用户 RPC 数据中，并经过 ASKPASS stdout；私钥还会短时存在于明文临时文件中。交互输入只显示与用户输入数量对应的 `*`，不显示秘密内容，但掩码数量和终端本身不是防窥探保证。零化、受限文件名和短生命周期只能降低意外暴露，不能抵抗同用户读取内存、替换可执行文件、截获 RPC/stdout 或复制临时文件。
 
@@ -79,7 +79,7 @@ Vault 私钥仅在 OpenSSH 需要时通过单 Secret RPC 取出，并写入数�
 9. OpenSSH、sudo、PAM、sudoers、网络设备和远端账号配置仍决定真实权限；PEM marker 校验不等于真实认证成功。
 10. 本地停止任务或隧道不证明远端动作已经停止或没有发生副作用。
 11. zeroize 不能证明所有内存拷贝、core dump、分页或序列化临时副本均被擦除；临时文件正常清理也不能覆盖异常终止。
-12. Windows 原生 ACL、OpenSSH ASKPASS 行为及真实 Vault 密码/私钥认证尚未完成本轮验证，不能把 Unix `0600` 或 Linux fixture 结果外推为跨平台保证。
+12. Windows 原生 ACE 与 Broker 进程退出后的第二客户端复用已实际测试覆盖；真实密码认证、完整 ConPTY/输出管道变体及全认证 operation 场景仍未完成。Unix `0600` 或 Linux fixture 结果不外推为跨平台保证，Windows 后台子进程的 stdout/stderr 也不能随意继承造成测试 EOF 假死。
 13. 同用户审批、Broker token 和文件权限不构成 L2；语言选择、双语 TUI 或配置 schema 也不改变认证信任边界。
 
 ## 安全开发约束

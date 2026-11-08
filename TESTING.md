@@ -9,7 +9,7 @@
 - Windows 原生 `cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets -- --test-threads=1` 和 `cargo build` 均通过；这只证明当前 Rust 检查与构建，不证明 Windows ACL 或真实 Vault 认证。
 - 隔离、无 Vault 注入的 Instabox `remxo-dev` 上，`python3 tests/run_all.py` 的 `checks/fmt`、`checks/clippy`、`checks/unit`、`checks/build`、fake、PTY、两个 real suite、sudo 和 cleanup 均为 PASSED，真实 suite 未跳过。
 - 6 个 PTY case 实际覆盖连续掩码密码/备份流程、基础主机向导、光标编辑与主机编辑、交互中文数字语言选择与中文解锁、Vault password 向导 Test→Save、Vault key 路径导入向导 Test→Save。真实 sshd 另行通过 Vault password/加密私钥 exec、Vault password put、Vault key get、严格 HostKey 负例与恢复、正常临时 key 清理及秘密扫描。fake 另验证真实 ASKPASS password 回环、错误提示拒绝和超时临时 key 清理。
-- **Windows 原生 ACL/临时私钥权限和真实 ASKPASS 密码/私钥认证仍为 NOT_RUN**。非 Unix `store` 限制 helper 本身不会建立等价 Windows ACL；不能把 Unix `0600` 或本机 Rust 测试外推为 Windows 协议/权限结果。
+- Windows 已实际执行原生 ACE fixture，确认只有当前用户拥有临时私钥授权；Windows 原生 Clippy/全目标测试也通过 CLI 进程退出后第二客户端仍能读取 `broker_running=true` 与 `vault_locked=false` 的生命周期用例。Linux 结果不等同于该验证。**Windows 真实密码认证、更多 ConPTY 变体及完整认证矩阵仍为 NOT_RUN**，不据此宣称全面兼容或独立安全审计。
 - Vault task/tunnel/TUI interactive SSH/SFTP、错误凭据矩阵、Test 失败/Esc 的残留凭据边界、启动失败清理和强制终止/崩溃清理仍未全部验证。结果不对应任何远端 GitHub CI 运行，不宣称跨平台、全部服务端或全认证操作矩阵通过。
 
 下面的 suite 描述说明测试入口、实际覆盖与保留缺口。后续的覆盖要求仍列在“Vault 认证验收要求”一节，只有实际执行对应测试才能把新增子项标为通过。
@@ -192,7 +192,7 @@ PTY transcript 仅做内存泄漏检查，不打印密码或大段终端内容�
 | PTY/wizard | 隐藏 SSH 密码/口令、私钥路径导入；先导入再 pending test；失败/Esc 不保存 Host 但密文保留；直接 Save；sudo 独立后配置 | 将 SSH 密码/口令/test-only key 纳入 transcript/Vault/audit 泄漏扫描，结果不打印秘密。 |
 | 真实 Vault public key | 临时 sshd 只允许 publickey；本地生成 test-only（含加密）私钥，经 Vault 导入并解锁；ASKPASS 提供口令；exec/task/SCP、TUI interactive SSH/SFTP/tunnel 的真实连接 | 临时 known_hosts 严格；错误口令、缺失 key、错误 Host key 必须失败且不重试；不得使用用户 `~/.ssh`。 |
 | 真实 Vault password | 另一个隔离 sshd fixture 明确允许仅测试账号 password auth；隐藏导入登录密码并验证共享操作路径 | 密码仅在容器/临时环境生成，auth log/输出不泄露；错误密码最多一次提示，不回退其他身份。 |
-| Windows 原生 | ACL 实际权限、当前 executable ASKPASS 调度、临时 key 可供 OpenSSH 读取、正常清理及真实密码/公钥认证 | 在独立临时 Windows fixture 实跑之前始终标 NOT_RUN，不由 Linux CI 推断。 |
+| Windows 原生 | 独立临时文件验证 `FileSecurity` 清除继承和旧 ACE，只授权当前用户；另一独立 CLI/客户端用例验证退出后 Broker 复用 | 当前 fixture 已覆盖临时私钥权限及分离生命周期。真实密码认证、完整 ConPTY/输出管道变体、所有认证 operation/权限场景仍为 NOT_RUN，不用 Unix `0600` 或平凡 stdout 捕获代替真实终端验收。 |
 
 真实 password 与 publickey fixture 必须隔离服务端配置；不能为了图方便在用户 sshd 上开启密码登录，也不能把容器密码或私钥提交到仓库。若某条路径尚未实现对应 interactive 驱动，应将该子项标 NOT_RUN 或明确 unsupported，而不是改写成 pass。
 

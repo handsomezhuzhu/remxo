@@ -60,7 +60,7 @@ Linux 下可运行自包含 fake、PTY 与可选 Docker/真实 sshd 测试，无
 python3 tests/run_all.py
 ```
 
-测试分层、清理规则、环境要求和当前验证边界见 [TESTING.md](TESTING.md)。2026-11-08 本次工作副本已通过 Windows 原生 Clippy、全目标 Rust 测试和构建，并在隔离 Instabox 上完整通过 Linux `python3 tests/run_all.py`（fake、6 个 PTY 用例（含中文数字初始化/中文解锁、掩码、光标主机编辑和保存后 `doctor`）、真实 SSH/SFTP/隧道/任务、Vault 密码/加密私钥执行与 SCP、sudo 和清理）。这些结果不证明 Windows 原生 ACL/真实 Vault 认证、所有 Vault task/tunnel/交互路径、崩溃清理或通用服务端兼容性。
+测试分层、清理规则、环境要求和当前验证边界见 [TESTING.md](TESTING.md)。2026-11-08 本次工作副本已通过 Windows 原生 Clippy、全目标 Rust 测试和构建，并在隔离 Instabox 上完整通过 Linux `python3 tests/run_all.py`（fake、6 个 PTY 用例（含中文数字初始化/中文解锁、掩码、光标主机编辑和保存后 `doctor`）、真实 SSH/SFTP/隧道/任务、Vault 密码/加密私钥执行与 SCP、sudo 和清理）。这些结果不证明 Windows 的所有认证场景、所有 Vault task/tunnel/交互路径、崩溃清理或通用服务端兼容性。
 
 `REMXO_SSH`、`REMXO_SCP` 可指向隔离的测试 fake。真实主机操作时，不要把它们指向不可信程序。
 
@@ -100,6 +100,12 @@ target 前的全局参数包括 `--json`、`--no-color`、`--timeout`、`--max-o
 与 OpenSSH 首次连接所需的主机密钥确认应由人类提前完成。Remxo 从不自动添加 `StrictHostKeyChecking=no`、`UserKnownHostsFile=/dev/null` 或 `ForwardAgent=yes`。
 
 `remxo doctor [alias]` 先检查本地配置；指定 alias 时，才按用户显式操作，通过同一套认证准备对保存的 Host 执行有界的 POSIX `true` 握手。它报告连接结果，不放宽主机密钥检查，不执行写入命令，也不会在后台自动监视连接。
+
+## Vault 解锁与终端生命周期
+
+`unlock` 解锁的是**本地 Broker 进程内存中的 VaultSession**，不是某一个 PowerShell 窗口。后续其它终端的 CLI 会复用该 Broker 的内存会话，`vault.json` 始终保持密文。关闭已经结束的命令或终端，不会因此自动清除 DEK。第二个终端应该通过 `remxo status` 查看 `vault_locked` 和 `broker_running`。
+
+Windows 使用 `DETACHED_PROCESS`、`CREATE_NEW_PROCESS_GROUP` 和 `CREATE_NO_WINDOW` 启动 Broker，使后台 Broker 不再依附启动它的控制台进程组。Unix 在 Tokio 创建线程前完成 daemon 分离，实现对应生命周期。Broker 退出、锁定、崩溃或系统重启时，内存中的解锁状态必然丢失。`remxo lock` 只锁定会话；`remxo lock --stop-broker` 则额外请求 Broker 正常退出，用于升级或明确重启。其它 `--config` 目录或其它系统用户拥有独立的 Vault/Broker 生命周期，不会共用同一解锁状态。环境中没有明文主密码，也没有保存明文会话的文件。
 
 ## SSH 认证与 Vault 凭据
 
@@ -244,7 +250,7 @@ SCP 使用 `scp -s` 强制 SFTP 模式，避免 legacy SCP 的远端 shell 路�
 - 仅 POSIX 非交互命令组合受支持；PowerShell、CMD、device/custom 返回明确不支持，不套用 POSIX 引用。
 - TUI 支持监视、搜索、添加/编辑主机、显式连接测试、lock/unlock 和交互 SSH；删除向导、TUI 审批/备份操作仍在后续阶段。设置支持语言、超时和输出上限修改，并原子保存配置。
 - 任务不会在 Broker 重启后恢复；远程脱离执行、连接复用和通用 SSH 服务端兼容性既未全部实现，也未得到证明。
-- Windows 原生权限加固和真实 Vault 密码/私钥认证尚未验证。不得把 Unix 临时文件 `0600` 行为宣称为已验证的 Windows ACL 行为或跨平台认证支持。
+- Windows 已有原生 ACE 专项验证，证明临时私钥仅授权当前用户，并验证第一进程退出后第二客户端仍复用解锁 Broker。真实密码认证、完整 ConPTY 场景、崩溃清理和所有 Vault operation 变种仍未全部验证；不得把 Unix `0600` 或 Linux 结果外推为跨平台认证保证。
 - 生物识别解锁、Linux Secret Service、TPM、L2 独立 OS 用户 Broker、L3 短期证书与集中授权尚未实现。
 
 架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，安全验证见 [TESTING.md](TESTING.md)，AI 使用与开发约定见 [AGENTS.md](AGENTS.md)。

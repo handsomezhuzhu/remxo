@@ -101,7 +101,7 @@ impl TemporaryPrivateKey {
         crate::store::ensure_private_dir(parent)?;
         let mut temporary = NamedTempFile::new_in(parent)
             .map_err(|error| AppError::io("create managed temporary key file", error))?;
-        crate::store::restrict_file(temporary.as_file())?;
+        crate::store::restrict_file(temporary.as_file(), temporary.path())?;
         std::io::Write::write_all(temporary.as_file_mut(), contents.as_bytes())
             .map_err(|error| AppError::io("write temporary key file", error))?;
         temporary
