@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.tgz
+packages/*/vendor/**/remxo
+packages/*/vendor/**/remxo.exe

@@ -97,6 +97,12 @@ Vault 私钥仅在 OpenSSH 需要时通过单 Secret RPC 取出，并写入数�
 
 当前安全能力不代表独立渗透测试、密码学评审或跨平台验证已经完成。本次隔离 Linux fake/PTY/real-sshd/sudo/cleanup 回归和 Windows 原生 Rust 检查/构建状态见 [TESTING.md](TESTING.md)；Windows 原生认证/ACL、未逐项执行的 Vault 操作及异常终止清理仍不得写成通过。
 
+### npm 原生分发边界
+
+- npm 只是原生 Rust 二进制的分发与启动方式，不引入 JS Vault/Broker/TUI。optional 包必须按 os/arch 与主包精确同版本，缺包或版本不一致失败关闭；不使用 PATH 上的任意替代程序。
+- 不支持安装脚本下载二进制、用户侧 Cargo 编译或运行时自动更新；暂存时核对 `remxo --version`。待执行发布、升级和 macOS 签名/notarization 验收前，不宣称完整 registry 发布通过。
+- 打包后 ASKPASS 与 daemon 仍以 native executable 运行，而非 Node；Node 微调包具有启动本地二进制的权限，其完整性也是供应链边界，不能提供 L2 同用户隔离。
+
 ## 依赖审计说明
 
 2026-11-07 对提交的 `Cargo.lock` 执行了 `cargo audit`，没有返回已知漏洞；RustSec 报告 `RUSTSEC-2025-0069`：`daemonize` 被标记为 unmaintained。该库仅用于 Unix Broker 会话分离，非密码学实现。此警告不等于当前没有漏洞或已获维护者背书，也不能覆盖后续认证改动。CI 保留并显示审计结果，不添加忽略规则。后续应评估维护中替代方案或迁移实现，并在替换后重新验证 PTY 生命周期。

@@ -101,6 +101,10 @@ Editing is a separate flow. The alias is fixed, `edit_host` rejects an expected-
 - `host.rs`: shared add/edit registration used by command-line and form flows; validates and atomically saves without storing secret values or imported private-key paths in Host or preview. Edits use expected-Host checks to reject stale forms.
 - `store.rs`: private directory/file helpers and atomic writes. Unix modes are explicit; non-Unix helpers do not by themselves establish equivalent native Windows ACLs.
 
+## Native npm launcher
+
+The optional npm distribution is not another runtime or UI. `npm/bin/remxo.js` and `npm/lib/*` map the current OS/architecture to a same-version platform package under `@remxo/core-*`. Each package carries only its native `vendor/<target>/bin/remxo[.exe]`; no postinstall download or user-side Cargo/N-API build is used. Strict manifests, package versions and native `--version` are checked during staging. Missing packages, unsupported targets and version mismatches fail closed; the launcher never falls back to PATH. Supporting Unix uses `execve` with the native binary as argv0; other hosts use a direct argv-based child with inherited terminal I/O and preserve exit/signal behavior. `REMXO_CORE_PATH` is reserved for development/isolated fixtures, not production resolution. The packaged Broker-daemon and ASKPASS paths still select the native executable itself, never Node.
+
 ## Data formats
 
 Configuration has `version = 1`, strict unknown-field rejection, `settings` and `[hosts.alias]`. `settings.language` is persisted as `en` or `zh-CN`; missing legacy values deserialize as `en`. Save operations use same-directory temporary files, permission restriction where implemented and atomic replacement; existing configuration is backed up first.

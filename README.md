@@ -23,6 +23,26 @@ Remxo is a local remote-server inventory, orchestration, and execution tool. It 
 - Broker task state/logs/cancellation, basic OpenSSH tunnel lifecycle, and Broker-authorized SCP upload/download using forced SFTP mode.
 - English and Simplified Chinese main TUI and host wizard, with Hosts, Sessions, Tasks, Approvals, Audit, Backup, and Settings panels.
 
+## npm distribution
+
+The intended native installation is:
+
+```console
+npm install -g remxo
+```
+
+This requires Node.js 18 or newer. The npm package contains only a small launcher; exact-version optional packages carry precompiled native Rust executables for Windows x64 and Linux x64 (glibc), with macOS x64/arm64 artifact packaging wired for release CI. The launcher selects the package for `process.platform` and `process.arch`, validates its version and vendored binary, then uses `execve` on supported Unix systems or a direct argv/`stdio: inherit` child process on Windows. It does not use a local shell, Node TUI, postinstall download, user-side Cargo build, runtime automatic update, or fallback to an arbitrary `remxo` on PATH. A missing or mismatched platform package fails explicitly. Alpine/musl and other unlisted platforms need a separate native build and verification; the glibc package is not guaranteed to run there.
+
+Release artifacts are staged by `.github/workflows/npm-release.yml` on a version tag or manual dispatch; the workflow does not publish to npm by itself. The corresponding package version and native `remxo --version` must match exactly. See the packaging scripts for local artifact staging:
+
+```console
+cargo build --release
+node scripts/npm/pack.js --platform linux-x64 --artifact target/release/remxo --out target/npm/core
+node scripts/npm/pack.js --main --out target/npm/launcher
+```
+
+Use `REMXO_CORE_PATH` only for development or isolated test fakes. Production installations resolve the versioned platform package instead of this override.
+
 ## Build and test
 
 Stable Rust (MSRV 1.88), Python 3 for the integration driver, and a system OpenSSH client are required.
@@ -32,7 +52,7 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets -- --test-threads=1
 cargo build
-```
+npm test --prefix npm
 
 On Linux, run the self-contained fake, PTY, and optional Docker/real-sshd suites without supplying any real server or credential:
 

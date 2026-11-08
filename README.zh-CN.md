@@ -23,6 +23,26 @@ Remxo 是本地远程服务器清单、编排与执行工具。它复用系统 O
 - Broker 任务状态/日志/取消、OpenSSH 隧道生命周期基础管理、经 Broker 授权并强制 SFTP 模式的 SCP 上传下载。
 - 主 TUI 和主机向导支持英文与简体中文，提供 Hosts、Sessions、Tasks、Approvals、Audit、Backup、Settings 面板。
 
+## npm 安装与原生二进制分发
+
+发布后的原生安装方式如下：
+
+```console
+npm install -g remxo
+```
+
+需要 Node.js 18 或更新版本。npm 主包只包含轻量启动器；精确同版本的 optional 平台包携带预编译 Rust 可执行文件。当前打包目标包括 Windows x64、Linux x64（glibc），macOS x64/ARM64 的构建产物打包也已接入发布 CI。启动器根据 `process.platform`/`process.arch` 选择平台包，校验版本和内嵌二进制，在支持的 Unix 上通过 `execve` 替换 Node，在 Windows 上直接以 argv、`stdio: inherit` 启动子进程。它不使用本地 shell、Node TUI、postinstall 下载、用户侧 Cargo 编译、运行时自动更新，也不会静默回退到 PATH 上任意版本的 Remxo。缺少或错配平台包会明确失败。Alpine/musl 及其他未列出的平台需要独立原生构建与验证，glibc 包不保证能在这些平台运行。
+
+发布产物由 `.github/workflows/npm-release.yml` 在版本 tag 或手动触发时构建；该工作流本身不会发布 npm。包版本与原生 `remxo --version` 必须精确一致。本地构建产物暂存方式：
+
+```console
+cargo build --release
+node scripts/npm/pack.js --platform linux-x64 --artifact target/release/remxo --out target/npm/core
+node scripts/npm/pack.js --main --out target/npm/launcher
+```
+
+`REMXO_CORE_PATH` 仅用于开发或隔离测试 fake；生产安装通过精确版本的平台包定位二进制，不依赖此覆盖值。
+
 ## 构建与测试
 
 需要稳定版 Rust（MSRV 1.88）、集成测试驱动所需的 Python 3，以及系统 OpenSSH 客户端。
@@ -32,7 +52,7 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets -- --test-threads=1
 cargo build
-```
+npm test --prefix npm
 
 Linux 下可运行自包含 fake、PTY 与可选 Docker/真实 sshd 测试，无需提供任何真实服务器或凭据：
 

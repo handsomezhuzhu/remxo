@@ -129,8 +129,15 @@ def main():
                 results.append(result)
                 if result["status"] != "passed":
                     break
-            if any(item["suite"].startswith("checks/") and item["status"] != "passed" for item in results):
+            if any(item["suite"].startswith("checks/") and item["status"] == "failed" for item in results):
                 break
+            if shutil.which("node") and shutil.which("npm"):
+                result = execute("checks/node", ["npm", "test", "--prefix", "npm"], env)
+                results.append(result)
+                if result["status"] != "passed":
+                    break
+            else:
+                results.append(skipped("checks/node", "Node.js/npm were not found; launcher tests were NOT_RUN"))
         elif not sys.platform.startswith("linux"):
             results.append(skipped(suite, "Linux is required for this integration suite"))
         elif suite in ("real", "sudo") and args.no_real_ssh:

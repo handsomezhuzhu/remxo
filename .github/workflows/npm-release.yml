@@ -1,0 +1,134 @@
+name: npm release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version (defaults to npm/package.json)
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remxo-npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  core:
+    name: ${{ matrix.platform }} core
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - platform: win32-x64
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            binary: remxo.exe
+          - platform: linux-x64
+            os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            binary: remxo
+          - platform: darwin-x64
+            os: macos-15-intel
+            rust-target: x86_64-apple-darwin
+            binary: remxo
+          - platform: darwin-arm64
+            os: macos-15
+            rust-target: aarch64-apple-darwin
+            binary: remxo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: release-version
+        shell: bash
+        env:
+          RELEASE_INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            value="${GITHUB_REF_NAME#v}"
+          else
+            value="$RELEASE_INPUT_VERSION"
+          fi
+          if [[ -z "$value" ]]; then
+            value="$(node -p "require('./npm/package.json').version")"
+          fi
+          if [[ "$value" == *[!0-9A-Za-z.+-]* ]]; then
+            echo "invalid package version" >&2
+            exit 1
+          fi
+          echo "version=$value" >> "$GITHUB_OUTPUT"
+      - name: Test launcher
+        shell: bash
+        run: npm test --prefix npm
+      - name: Build native core
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.rust-target }}"
+          cargo build --release --locked --target "${{ matrix.rust-target }}"
+      - name: Verify, stage, and pack native core
+        shell: bash
+        run: |
+          node scripts/npm/pack.js \
+            --platform "${{ matrix.platform }}" \
+            --artifact "$PWD/target/${{ matrix.rust-target }}/release/${{ matrix.binary }}" \
+            --version "${{ steps.release-version.outputs.version }}" \
+            --out "$PWD/artifacts/${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remxo-core-${{ matrix.platform }}
+          path: artifacts/${{ matrix.platform }}/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  launcher:
+    name: remxo launcher
+    needs: core
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: release-version
+        shell: bash
+        env:
+          RELEASE_INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            value="${GITHUB_REF_NAME#v}"
+          else
+            value="$RELEASE_INPUT_VERSION"
+          fi
+          if [[ -z "$value" ]]; then
+            value="$(node -p "require('./npm/package.json').version")"
+          fi
+          if [[ "$value" == *[!0-9A-Za-z.+-]* ]]; then
+            echo "invalid package version" >&2
+            exit 1
+          fi
+          echo "version=$value" >> "$GITHUB_OUTPUT"
+      - name: Test launcher
+        run: npm test --prefix npm
+      - name: Pack launcher with pinned optional dependencies
+        run: |
+          node scripts/npm/pack.js \
+            --main \
+            --version "${{ steps.release-version.outputs.version }}" \
+            --out "$PWD/artifacts/launcher"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remxo-npm-launcher
+          path: artifacts/launcher/*.tgz
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,25 @@
+{
+  "name": "remxo",
+  "version": "0.1.0",
+  "description": "Remote execution for humans and agents",
+  "license": "MIT",
+  "bin": {
+    "remxo": "bin/remxo.js"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@remxo/core-darwin-arm64": "0.1.0",
+    "@remxo/core-darwin-x64": "0.1.0",
+    "@remxo/core-linux-x64": "0.1.0",
+    "@remxo/core-win32-x64": "0.1.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

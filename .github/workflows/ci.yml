@@ -42,6 +42,23 @@ jobs:
         shell: bash
         run: cargo build
 
+  npm-launcher:
+    name: ${{ matrix.os }} / npm launcher
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test launcher and offline package
+        shell: bash
+        run: npm test --prefix npm
+
   msrv:
     name: Linux / Rust 1.88 MSRV
     runs-on: ubuntu-latest
