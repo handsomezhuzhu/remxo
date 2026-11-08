@@ -464,8 +464,7 @@ fn classify_ssh_failure(stderr: &str) -> AppError {
     };
     let message = match code {
         ErrorCode::HostKeyFailed => {
-            "OpenSSH host key verification failed. Remxo never disables host key checks; a human must verify the host key."
-                .to_string()
+            "OpenSSH host key verification failed. Remxo never disables host key checks; run 'remxo host key fetch <alias>', verify the fingerprint out-of-band, then 'remxo host key trust <alias> --fingerprint SHA256:...'.".to_string()
         }
         ErrorCode::AuthenticationFailed => format!(
             "OpenSSH authentication failed. Remxo does not retry or request credentials from an agent. OpenSSH diagnostic: {}",

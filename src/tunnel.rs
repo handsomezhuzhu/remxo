@@ -211,6 +211,7 @@ impl TunnelManager {
             destination,
         ]);
         let mut command = Command::new(transport.binary());
+        crate::process::tokio_without_console_window(&mut command);
         let authentication = prepare_authentication(host, auth_context, false).await?;
         authentication.apply(&mut command);
         let mut child = command

@@ -104,6 +104,29 @@ enum HostAction {
         #[arg(long)]
         yes: bool,
     },
+    #[command(subcommand)]
+    Key(HostKeyAction),
+}
+
+#[derive(Debug, Subcommand)]
+enum HostKeyAction {
+    Status {
+        target: String,
+    },
+    Fetch {
+        target: String,
+    },
+    Trust {
+        target: String,
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
+    List,
+    Remove {
+        target: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -535,6 +558,9 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
                 ),
             )?;
         }
+        Some(Action::Host(HostAction::Key(action))) => {
+            host_key_command(&paths, &cli, action, language)?
+        }
         Some(Action::Vault(VaultAction::ChangePassword)) => {
             let old = hidden_password("Current master password: ")?;
             let new = hidden_password_confirmed("New master password: ")?;
@@ -945,6 +971,176 @@ fn parse_profile_arguments(
     Ok((Some(profile), values))
 }
 
+fn host_key_command(
+    paths: &AppPaths,
+    cli: &Cli,
+    action: HostKeyAction,
+    language: crate::config::UiLanguage,
+) -> Result<()> {
+    let config = Config::load(&paths.config)?;
+    match action {
+        HostKeyAction::Status { target } => {
+            let status = crate::hostkey::status(&config, &target)?;
+            let human = if status.fingerprints.is_empty() {
+                match language {
+                    crate::config::UiLanguage::ZhCn => format!(
+                        "主机 '{}' 的主机密钥未登记：{}:{}。",
+                        status.host, status.address, status.port
+                    ),
+                    crate::config::UiLanguage::En => format!(
+                        "Host '{}' has no known_hosts entry: {}:{}.",
+                        status.host, status.address, status.port
+                    ),
+                }
+            } else {
+                let fingerprints = status
+                    .fingerprints
+                    .iter()
+                    .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                match language {
+                    crate::config::UiLanguage::ZhCn => format!(
+                        "主机 '{}' 的主机密钥已登记：{}。",
+                        status.host, fingerprints
+                    ),
+                    crate::config::UiLanguage::En => format!(
+                        "Host '{}' host key is known: {}.",
+                        status.host, fingerprints
+                    ),
+                }
+            };
+            emit(&status, cli.json, &human)?;
+        }
+        HostKeyAction::Fetch { target } => {
+            let resolved = resolve_target(&config, &target)?;
+            let keys = crate::hostkey::fetch(&resolved.host)?;
+            let value = serde_json::json!({
+                "host": resolved.alias,
+                "address": resolved.host.hostname.clone().or(resolved.host.ssh_alias.clone()),
+                "port": resolved.host.port,
+                "keys": keys,
+            });
+            let human = if language == crate::config::UiLanguage::ZhCn {
+                let lines = keys
+                    .iter()
+                    .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "服务器主机密钥指纹：\n{lines}\n请先人工核对，再执行 remxo host key trust {resolved_alias}。",
+                    resolved_alias = resolved.alias
+                )
+            } else {
+                let lines = keys
+                    .iter()
+                    .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Server host key fingerprints:\n{lines}\nVerify out-of-band, then run: remxo host key trust {alias}",
+                    alias = resolved.alias
+                )
+            };
+            emit(&value, cli.json, &human)?;
+        }
+        HostKeyAction::Trust {
+            target,
+            fingerprint,
+        } => {
+            let resolved = resolve_target(&config, &target)?;
+            if fingerprint.is_none() {
+                let keys = crate::hostkey::fetch(&resolved.host)?;
+                crate::hostkey::confirm_trust_interactively(&keys)?;
+            }
+            let result =
+                crate::hostkey::trust(&resolved.alias, &resolved.host, fingerprint.as_deref())?;
+            let human = if result.added.is_empty() {
+                match language {
+                    crate::config::UiLanguage::ZhCn => {
+                        format!("主机 '{}' 的主机密钥已在 known_hosts 中。", result.host)
+                    }
+                    crate::config::UiLanguage::En => {
+                        format!("Host '{}' host key is already in known_hosts.", result.host)
+                    }
+                }
+            } else {
+                let added = result
+                    .added
+                    .iter()
+                    .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                match language {
+                    crate::config::UiLanguage::ZhCn => {
+                        format!("已信任主机 '{}' 的主机密钥：{}。", result.host, added)
+                    }
+                    crate::config::UiLanguage::En => {
+                        format!("Trusted host '{}' key: {}.", result.host, added)
+                    }
+                }
+            };
+            emit(&result, cli.json, &human)?;
+        }
+        HostKeyAction::List => {
+            let statuses = crate::hostkey::list(&config)?;
+            let human = if language == crate::config::UiLanguage::ZhCn {
+                let mut lines = vec!["别名\t地址\t端口\t主机密钥".to_string()];
+                for status in &statuses {
+                    lines.push(format!(
+                        "{}\t{}:{}\t{}",
+                        status.host,
+                        status.address,
+                        status.port,
+                        if status.known {
+                            "已登记"
+                        } else {
+                            "未登记"
+                        }
+                    ));
+                }
+                lines.join("\n")
+            } else {
+                let mut lines = vec!["ALIAS\tADDRESS\tPORT\tHOST KEY".to_string()];
+                for status in &statuses {
+                    lines.push(format!(
+                        "{}\t{}:{}\t{}",
+                        status.host,
+                        status.address,
+                        status.port,
+                        if status.known { "known" } else { "unknown" }
+                    ));
+                }
+                lines.join("\n")
+            };
+            emit(&statuses, cli.json, &human)?;
+        }
+        HostKeyAction::Remove { target, yes } => {
+            if !yes {
+                return Err(AppError::invalid_argument(
+                    "host key removal requires --yes; this changes OpenSSH known_hosts",
+                ));
+            }
+            let resolved = resolve_target(&config, &target)?;
+            crate::hostkey::remove(&resolved.host)?;
+            emit(
+                &serde_json::json!({"removed": resolved.alias}),
+                cli.json,
+                &match language {
+                    crate::config::UiLanguage::ZhCn => {
+                        format!("已从 known_hosts 移除主机 '{}' 的密钥。", resolved.alias)
+                    }
+                    crate::config::UiLanguage::En => format!(
+                        "Removed host key for '{}' from known_hosts.",
+                        resolved.alias
+                    ),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 async fn host_add(paths: &AppPaths, cli: &Cli, add: HostAdd) -> Result<()> {
     let needs_form = add.interactive
         || add.alias.is_none()
@@ -1106,7 +1302,10 @@ async fn doctor(
 ) -> Result<u8> {
     let config = Config::load(&paths.config)?;
     let ssh = std::env::var_os("REMXO_SSH").unwrap_or_else(|| "ssh".into());
-    let output = std::process::Command::new(ssh).arg("-V").output();
+    let mut command = std::process::Command::new(ssh);
+    command.arg("-V");
+    crate::process::without_console_window(&mut command);
+    let output = command.output();
     let (available, version) = match output {
         Ok(output) => {
             let bytes = if output.stdout.is_empty() {

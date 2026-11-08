@@ -44,6 +44,7 @@ pub(crate) async fn run_process(
     stdin_data: Option<Zeroizing<Vec<u8>>>,
     cancellation: Option<CancellationToken>,
 ) -> Result<RawProcessOutput> {
+    crate::process::tokio_without_console_window(command);
     command
         .stdin(if stdin_data.is_some() {
             Stdio::piped()

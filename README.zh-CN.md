@@ -4,6 +4,19 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+详细的项目文档与架构文档见 [`docs/README.md`](docs/README.md)；可复用的 AI 运维 Skill 见 [`.opencode/skills/remxo/SKILL.md`](.opencode/skills/remxo/SKILL.md)。
+
+## 快速导航
+
+| 目标 | 命令 |
+| --- | --- |
+| 安装当前 RC | `npm install -g remxo@rc` |
+| 初始化配置和 Vault | `remxo init --lang zh-CN` |
+| 查看已登记主机 | `remxo hosts` |
+| 执行只读远程命令 | `remxo --json prod-01 df -hT` |
+| 新服务器主机密钥登记 | `remxo host key fetch prod-01` → `remxo host key trust prod-01 --fingerprint SHA256:...` |
+| 阅读完整文档 | [`docs/README.md`](docs/README.md) |
+
 Remxo 是本地远程服务器清单、编排与执行工具。它复用系统 OpenSSH 客户端，提供加密 Vault、同用户 Broker、策略与一次性审批、面向 AI 的 JSON、元数据审计、基础中英双语 TUI，以及有限实现的文件传输、隧道和后台任务。
 
 > 当前是未经独立安全审计的开发版，安全等级为 **L1**，不是 L2 同用户隔离。它不宣称“生产绝对安全”，也不替代远程账号自身的授权边界。
@@ -28,12 +41,18 @@ Remxo 是本地远程服务器清单、编排与执行工具。它复用系统 O
 发布后的原生安装方式如下：
 
 ```console
+npm install -g remxo@rc
+```
+
+正式 `latest` 版本发布后可使用：
+
+```console
 npm install -g remxo
 ```
 
 需要 Node.js 18 或更新版本。npm 主包只包含轻量启动器；精确同版本的 optional 平台包携带预编译 Rust 可执行文件。当前打包目标仅包括 Windows x64、Linux x64（glibc），macOS 适配和产物目标在拥有真实 Apple 设备进行验证之前暂停，当前 optional 包有意只覆盖 Windows/Linux。启动器根据 `process.platform`/`process.arch` 选择平台包，校验版本和内嵌二进制，在支持的 Unix 上通过 `execve` 替换 Node，在 Windows 上直接以 argv、`stdio: inherit` 启动子进程。它不使用本地 shell、Node TUI、postinstall 下载、用户侧 Cargo 编译、运行时自动更新，也不会静默回退到 PATH 上任意版本的 Remxo。缺少或错配平台包会明确失败。Alpine/musl 及其他未列出的平台需要独立原生构建与验证，glibc 包不保证能在这些平台运行。
 
-发布产物由 `.github/workflows/npm-release.yml` 在版本 tag 或手动触发时构建；该工作流本身不会发布 npm。包版本与原生 `remxo --version` 必须精确一致。Linux 构建、启动器检查及精确 Linux tarball 安装验收在 `instabox-medium` 上执行，只有不可替代的 Windows 任务消耗 GitHub 原生 runner 额度。本地构建产物暂存方式：
+发布产物由 `.github/workflows/npm-release.yml` 在版本 tag 或手动触发时构建并 stage。类似 `v0.1.0-rc1` 的 tag 会以 `rc` dist-tag stage 三个包；需要维护者用 2FA 批准每个 stage 后才会真正公开。稳定 tag 使用 `latest`。包版本与原生 `remxo --version` 必须精确一致。Linux 构建、启动器检查及精确 Linux tarball 安装验收在 `instabox-medium` 上执行，只有不可替代的 Windows 任务消耗 GitHub 原生 runner 额度。本地构建产物暂存方式：
 
 ```console
 cargo build --release
@@ -97,7 +116,7 @@ target 前的全局参数包括 `--json`、`--no-color`、`--timeout`、`--max-o
 
 在 `openssh-config`/`external-agent` 模式下，TTY 中无 command 会打开交互式 SSH；非 TTY 无 command 是用法错误。裸 `remxo` 只在真正的交互 TTY 中进入 TUI。子命令名和全局选项位置保留给 CLI，主机别名不应与之冲突。TUI 主机列表中的 **Enter** 路径会为 Vault 管理的交互式 SSH 提供 Broker 认证上下文。
 
-与 OpenSSH 首次连接所需的主机密钥确认应由人类提前完成。Remxo 从不自动添加 `StrictHostKeyChecking=no`、`UserKnownHostsFile=/dev/null` 或 `ForwardAgent=yes`。
+与 OpenSSH 首次连接所需的主机密钥确认应由人类提前完成。Remxo 从不自动添加 `StrictHostKeyChecking=no`、`UserKnownHostsFile=/dev/null` 或 `ForwardAgent=yes`。可先用 `remxo host key fetch <alias>` 查看指纹，人工核对后用 `remxo host key trust <alias> --fingerprint SHA256:...` 登记。
 
 `remxo doctor [alias]` 先检查本地配置；指定 alias 时，才按用户显式操作，通过同一套认证准备对保存的 Host 执行有界的 POSIX `true` 握手。它报告连接结果，不放宽主机密钥检查，不执行写入命令，也不会在后台自动监视连接。
 
@@ -105,7 +124,7 @@ target 前的全局参数包括 `--json`、`--no-color`、`--timeout`、`--max-o
 
 `unlock` 解锁的是**本地 Broker 进程内存中的 VaultSession**，不是某一个 PowerShell 窗口。后续其它终端的 CLI 会复用该 Broker 的内存会话，`vault.json` 始终保持密文。关闭已经结束的命令或终端，不会因此自动清除 DEK。第二个终端应该通过 `remxo status` 查看 `vault_locked` 和 `broker_running`。
 
-Windows 使用 `DETACHED_PROCESS`、`CREATE_NEW_PROCESS_GROUP` 和 `CREATE_NO_WINDOW` 启动 Broker，使后台 Broker 不再依附启动它的控制台进程组。Unix 在 Tokio 创建线程前完成 daemon 分离，实现对应生命周期。Broker 退出、锁定、崩溃或系统重启时，内存中的解锁状态必然丢失。`remxo lock` 只锁定会话；`remxo lock --stop-broker` 则额外请求 Broker 正常退出，用于升级或明确重启。其它 `--config` 目录或其它系统用户拥有独立的 Vault/Broker 生命周期，不会共用同一解锁状态。环境中没有明文主密码，也没有保存明文会话的文件。
+Windows 使用 `DETACHED_PROCESS` 和 `CREATE_NEW_PROCESS_GROUP` 启动 Broker，使后台 Broker 不再依附启动它的控制台进程组。ACL PowerShell、非交互 SSH/SCP/tunnel 进程分别使用 `CREATE_NO_WINDOW`，避免额外弹出可见控制台窗口；真正的交互式 SSH/SFTP 保持正常终端行为。Unix 在 Tokio 创建线程前完成 daemon 分离，实现对应生命周期。Unix 在 Tokio 创建线程前完成 daemon 分离，实现对应生命周期。Broker 退出、锁定、崩溃或系统重启时，内存中的解锁状态必然丢失。`remxo lock` 只锁定会话；`remxo lock --stop-broker` 则额外请求 Broker 正常退出，用于升级或明确重启。其它 `--config` 目录或其它系统用户拥有独立的 Vault/Broker 生命周期，不会共用同一解锁状态。环境中没有明文主密码，也没有保存明文会话的文件。
 
 ## SSH 认证与 Vault 凭据
 

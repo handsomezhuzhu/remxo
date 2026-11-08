@@ -1020,8 +1020,10 @@ pub struct BrokerClient {
     paths: AppPaths,
 }
 
+// Microsoft ignores CREATE_NO_WINDOW with DETACHED_PROCESS. Background
+// children therefore set CREATE_NO_WINDOW independently.
 #[cfg(windows)]
-const DETACHED_BROKER_CREATION_FLAGS: u32 = 0x00000008 | 0x00000200 | 0x08000000;
+const DETACHED_BROKER_CREATION_FLAGS: u32 = 0x00000008 | 0x00000200;
 
 #[cfg(windows)]
 fn detach_broker_from_terminal(command: &mut std::process::Command) {
@@ -1155,6 +1157,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn broker_detaches_windows_console_and_process_group() {
-        assert_eq!(DETACHED_BROKER_CREATION_FLAGS, 0x08000208);
+        assert_eq!(DETACHED_BROKER_CREATION_FLAGS, 0x00000208);
     }
 }

@@ -6,10 +6,10 @@
 
 截至 2026-11-08 本次未提交工作副本的实际验证结果：
 
-- Windows 原生 `cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets -- --test-threads=1` 和 `cargo build` 均通过；这只证明当前 Rust 检查与构建，不证明 Windows ACL 或真实 Vault 认证。
+- Windows 原生 `cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets -- --test-threads=1` 和 `cargo build` 均通过；这只是当前 Rust 自动检查与构建，不代表全部 Windows 认证、ConPTY/窗口场景都完成验证。
 - 隔离、无 Vault 注入的 Instabox `remxo-dev` 上，`python3 tests/run_all.py` 的 `checks/fmt`、`checks/clippy`、`checks/unit`、`checks/build`、fake、PTY、两个 real suite、sudo 和 cleanup 均为 PASSED，真实 suite 未跳过。
 - 6 个 PTY case 实际覆盖连续掩码密码/备份流程、基础主机向导、光标编辑与主机编辑、交互中文数字语言选择与中文解锁、Vault password 向导 Test→Save、Vault key 路径导入向导 Test→Save。真实 sshd 另行通过 Vault password/加密私钥 exec、Vault password put、Vault key get、严格 HostKey 负例与恢复、正常临时 key 清理及秘密扫描。fake 另验证真实 ASKPASS password 回环、错误提示拒绝和超时临时 key 清理。
-- Windows 已实际执行原生 ACE fixture，确认只有当前用户拥有临时私钥授权；Windows 原生 Clippy/全目标测试也通过 CLI 进程退出后第二客户端仍能读取 `broker_running=true` 与 `vault_locked=false` 的生命周期用例。Linux 结果不等同于该验证。**Windows 真实密码认证、更多 ConPTY 变体及完整认证矩阵仍为 NOT_RUN**，不据此宣称全面兼容或独立安全审计。
+- Windows 已实际执行原生 ACE fixture，确认只有当前用户拥有临时私钥授权；隐藏的 ACL PowerShell fixture 会检查自身没有可见控制台窗口。Windows 原生 Clippy/全目标测试也通过 CLI 进程退出后第二客户端仍能读取 `broker_running=true` 与 `vault_locked=false` 的生命周期用例。Linux 结果不等同于该验证。**Windows 真实密码认证、更多 ConPTY/可见窗口变体及完整认证矩阵仍为 NOT_RUN**，不据此宣称全面兼容或独立安全审计。
 - Vault task/tunnel/TUI interactive SSH/SFTP、错误凭据矩阵、Test 失败/Esc 的残留凭据边界、启动失败清理和强制终止/崩溃清理仍未全部验证。结果不对应任何远端 GitHub CI 运行，不宣称跨平台、全部服务端或全认证操作矩阵通过。
 
 下面的 suite 描述说明测试入口、实际覆盖与保留缺口。后续的覆盖要求仍列在“Vault 认证验收要求”一节，只有实际执行对应测试才能把新增子项标为通过。
@@ -192,7 +192,7 @@ PTY transcript 仅做内存泄漏检查，不打印密码或大段终端内容�
 | PTY/wizard | 隐藏 SSH 密码/口令、私钥路径导入；先导入再 pending test；失败/Esc 不保存 Host 但密文保留；直接 Save；sudo 独立后配置 | 将 SSH 密码/口令/test-only key 纳入 transcript/Vault/audit 泄漏扫描，结果不打印秘密。 |
 | 真实 Vault public key | 临时 sshd 只允许 publickey；本地生成 test-only（含加密）私钥，经 Vault 导入并解锁；ASKPASS 提供口令；exec/task/SCP、TUI interactive SSH/SFTP/tunnel 的真实连接 | 临时 known_hosts 严格；错误口令、缺失 key、错误 Host key 必须失败且不重试；不得使用用户 `~/.ssh`。 |
 | 真实 Vault password | 另一个隔离 sshd fixture 明确允许仅测试账号 password auth；隐藏导入登录密码并验证共享操作路径 | 密码仅在容器/临时环境生成，auth log/输出不泄露；错误密码最多一次提示，不回退其他身份。 |
-| Windows 原生 | 独立临时文件验证 `FileSecurity` 清除继承和旧 ACE，只授权当前用户；另一独立 CLI/客户端用例验证退出后 Broker 复用 | 当前 fixture 已覆盖临时私钥权限及分离生命周期。真实密码认证、完整 ConPTY/输出管道变体、所有认证 operation/权限场景仍为 NOT_RUN，不用 Unix `0600` 或平凡 stdout 捕获代替真实终端验收。 |
+| Windows 原生 | 独立临时文件验证 `FileSecurity` 清除继承和旧 ACE，只授权当前用户；独立 CLI/客户端用例验证退出后 Broker 复用；PowerShell fixture 通过 Win32 console visibility 检查后台窗口 | 当前 fixture 已覆盖临时私钥权限、分离生命周期及 scoped 隐藏进程检查。真实密码认证、完整 ConPTY/可见窗口变体、所有认证 operation/权限场景仍为 NOT_RUN，不由 fixture 外推整台桌面的交互体验，不用 Unix `0600` 或平凡 stdout 捕获代替真实终端验收。 |
 
 真实 password 与 publickey fixture 必须隔离服务端配置；不能为了图方便在用户 sshd 上开启密码登录，也不能把容器密码或私钥提交到仓库。若某条路径尚未实现对应 interactive 驱动，应将该子项标 NOT_RUN 或明确 unsupported，而不是改写成 pass。
 
@@ -201,14 +201,14 @@ PTY transcript 仅做内存泄漏检查，不打印密码或大段终端内容�
 - `npm test --prefix npm` 使用 Node 内置测试驱动，校验 os/arch/target triple、可选包缺失/版本错配拒绝、Unix `execve` 的 argv0、Windows argv/退出码与信号转发、发布 manifest 精确版本锁定、native 版本握手及离线 tarball 解包透传。
 - 该 suite 在当前 Windows x64 与隔离 Linux x64 上分别实跑 11/11；Windows 还实际打包并启动 native core。Linux 另做实际 platform/core tarball 打包检查。macOS 适配与产物目标暂停，未提供或验证 macOS optional 包。
 - 普通安装不用 `postinstall` 下载、用户侧 Cargo、N-API 或 PATH 回退。`REMXO_CORE_PATH` 仅用于开发或隔离 fake，不能把它描述成生产解析规则。
-- `.github/workflows/ci.yml` 的 `npm-launcher` 在 Windows 执行上述测试，其余 Linux 检查都放在 Instabox；`.github/workflows/npm-release.yml` 用同一版本 Rust release 构建与 native `--version` 握手打包并上传 artifact，不自动发布。真实 npm registry 发布、跨发布版本升级及 npm Trusted Publishing 尚未执行，必须保留为待验收或 `NOT_RUN`；macOS 适配与打包目前暂停。
+- `.github/workflows/ci.yml` 的 `npm-launcher` 在 Windows 执行上述测试，其余 Linux 检查都放在 Instabox；`.github/workflows/npm-release.yml` 用同一版本 Rust release 构建与 native `--version` 握手打包，并在 tag 触发时执行 `npm stage publish`。stage-only token 不直接公开版本；真实 registry 批准、跨发布版本升级及 npm Trusted Publishing 尚未执行，必须保留为待验收或 `NOT_RUN`；macOS 适配与打包目前暂停。
 
 ## GitHub Actions and Instabox CI
 
 - `.github/workflows/ci.yml`: Windows 上的 fmt、Clippy、Rust 全部测试和构建，以及 Windows `npm-launcher` 测试。为节省私有仓库的 GitHub 原生 runner 额度，Ubuntu Rust 检查、Rust 1.88 MSRV Docker 和 Linux npm 检查统一放到 Instabox；不把 Linux 结果外推成其他系统通过。macOS 适配和产物目标目前暂停。
 - `.github/workflows/instabox.yml`: 6 类隔离任务，直接 `runs-on: instabox-medium`，覆盖 Rust/release 检查、Rust 1.88 MSRV Docker 与 Linux npm 启动器、cargo-audit/Python 静态检查、fake/PTY/TUI、真实 sshd/sudo、20 轮并发稳定性。GitHub App 为每个 job 提供新 Ubuntu 24.04 runner 并在迭代结束时删除；不注入用户 Vault/Secrets。最多 3 个并发，避免一分钟启动限流。
 - 该 App 使用 GitHub 所需 Metadata/Actions/Administration 权限注册和回收 runner；App backend 不需要 `runs-on: instabox-medium` 作业配置 API Key。公开 fork PR 不启动这些任务，skipped/not_run 不代表通过。
-- `.github/workflows/npm-release.yml`: 版本 tag 或手动触发，最多 3 个并发。Linux core 与 launcher 在 `instabox-medium` 上完成精确版本构建、打包及精确 tarball 安装验收；Windows 在 GitHub 原生 runner 上构建。上传 tarball artifact，不自动发布、不注入用户 Vault/Secrets。真实 registry 发布和 npm Trusted Publishing 未因此标为通过，macOS 产物目标目前暂停。
+- `.github/workflows/npm-release.yml`: 版本 tag 或手动触发，最多 3 个并发。Linux core 与 launcher 在 `instabox-medium` 上完成精确版本构建、打包及精确 tarball 安装验收；Windows 在 GitHub 原生 runner 上构建。tag 触发时上传 tarball artifact 并调用 `npm stage publish`，不注入用户 Vault/Secrets，不直接公开 registry 版本。真实 stage 批准、registry 发布和 npm Trusted Publishing 未因此标为通过，macOS 产物目标目前暂停。
 - `scripts/test/instabox-run.sh` 用官方 `instabox run --push . --timeout 10m` 的方法做开发期单次测试，命令结束自动删机；它不是 GitHub Actions runner，也未用于 push 后的 CI。
 - `tests/property_invariants.rs`：任意 Unicode 多参数 token 往返、单 raw script 语义、输出 UTF8/控制符边界、明确秘密格式，以及 target 优先级。每组 property 128 例。
 - 历史 CI 或另一提交的绿灯不能替代当前认证改动的测试；报告必须对应实际源状态、二进制和 suite。
@@ -247,4 +247,4 @@ CI 的覆盖并未把本工具自称为跨发行版或跨平台全兼容；Windo
 - 远程脱离任务、跨 Broker 持久化、PowerShell/CMD、Telnet 网络自动化、连接复用、生物识别仍需独立实现与测试。
 - 既有隔离 Alpine sudo 场景不改变其他 sudoers/PTY 细节仍需独立系统测试的事实；不猜密码、不穷举。
 - 只检查 argv/env/log/输出的泄露，不声称证明所有内存拷贝、core dump 或其他秘密类别均已消失。
-- 正常 drop 删除临时 key 不等于异常退出清理或安全擦除；Windows 原生 ACL 与真实认证未完成前不得宣称跨平台权限或认证验证。
+- 正常 drop 删除临时 key 不等于异常退出清理或安全擦除；专项 ACE/窗口 fixture 不代表完整 Windows 认证、ConPTY 或真实桌面窗口矩阵，不能据此宣称跨平台权限或认证验证。

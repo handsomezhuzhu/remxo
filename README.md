@@ -4,6 +4,19 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+Detailed project and architecture documentation is in [`docs/README.md`](docs/README.md). A reusable AI operator skill lives at [`.opencode/skills/remxo/SKILL.md`](.opencode/skills/remxo/SKILL.md).
+
+## Quick navigation
+
+| Goal | Command |
+| --- | --- |
+| Install the current release candidate | `npm install -g remxo@rc` |
+| Initialize config and Vault | `remxo init --lang zh-CN` |
+| Inspect registered hosts | `remxo hosts` |
+| Run a read-only remote command | `remxo --json prod-01 df -hT` |
+| Onboard a new server host key | `remxo host key fetch prod-01` → `remxo host key trust prod-01 --fingerprint SHA256:...` |
+| Read the full documentation | [`docs/README.md`](docs/README.md) |
+
 Remxo is a local remote-server inventory, orchestration, and execution tool. It reuses the system OpenSSH client and provides an encrypted Vault, a same-user Broker, policies and one-time approvals, AI-oriented JSON, metadata audit, a basic bilingual TUI, and limited file-transfer, tunnel, and background-task support.
 
 > This is a development build without an independent security audit. Its security level is **L1**, not L2 same-user isolation. It does not claim absolute production safety and does not replace the authorization boundary of the remote account.
@@ -28,12 +41,13 @@ Remxo is a local remote-server inventory, orchestration, and execution tool. It 
 The intended native installation is:
 
 ```console
-npm install -g remxo
+npm install -g remxo@rc
 ```
 
+Use `npm install -g remxo` after a stable `latest` release is published.
 This requires Node.js 18 or newer. The npm package contains only a small launcher; exact-version optional packages carry precompiled native Rust executables for Windows x64 and Linux x64 (glibc). The launcher selects the package for `process.platform` and `process.arch`, validates its version and vendored binary, then uses `execve` on supported Unix systems or a direct argv/`stdio: inherit` child process on Windows. It does not use a local shell, Node TUI, postinstall download, user-side Cargo build, runtime automatic update, or fallback to an arbitrary `remxo` on PATH. A missing or mismatched platform package fails explicitly. Alpine/musl and other unlisted platforms need a separate native build and verification; the glibc package is not guaranteed to run there. macOS adaptation and package targets are paused until a real Apple device is available for verification, so the current npm optional packages intentionally cover only Windows/Linux.
 
-Release artifacts are staged by `.github/workflows/npm-release.yml` on a version tag or manual dispatch; the workflow does not publish to npm by itself. The corresponding package version and native `remxo --version` must match exactly. Linux builds, launcher checks and the exact Linux tarball installation smoke test run on `instabox-medium`; only the irreplaceable Windows jobs consume hosted GitHub runners. See the packaging scripts for local artifact staging:
+Release artifacts are built and staged by `.github/workflows/npm-release.yml` on a version tag or manual dispatch. A tag such as `v0.1.0-rc1` stages all three packages with the `rc` dist-tag; a maintainer must approve each staged version with 2FA before it becomes public. A stable tag uses `latest`. The corresponding package version and native `remxo --version` must match exactly. Linux builds, launcher checks and the exact Linux tarball installation smoke test run on `instabox-medium`; only the irreplaceable Windows jobs consume hosted GitHub runners. See the packaging scripts for local artifact staging:
 
 ```console
 cargo build --release
@@ -97,7 +111,7 @@ Global options before the target include `--json`, `--no-color`, `--timeout`, `-
 
 In `openssh-config`/`external-agent` modes, no command on a TTY opens interactive SSH; no command without a TTY is a usage error. Bare `remxo` enters the TUI only on a real interactive TTY. Subcommand names and global-option positions are reserved, so host aliases must not conflict with them. The TUI host-list **Enter** path supplies Broker authentication context for Vault-managed interactive SSH.
 
-A human should perform first-use host-key verification in advance. Remxo never adds `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`, or `ForwardAgent=yes`.
+A human should perform first-use host-key verification in advance. Remxo never adds `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`, or `ForwardAgent=yes`. Use `remxo host key fetch <alias>` to inspect fingerprints and `remxo host key trust <alias> --fingerprint SHA256:...` after out-of-band verification.
 
 `remxo doctor [alias]` first validates local configuration and explicitly, on request, probes one saved Host with a bounded POSIX `true` handshake through the same authentication preparation. It reports the result without weakening host-key checks or issuing a write command; it is not an automatic background health monitor.
 
@@ -105,7 +119,7 @@ A human should perform first-use host-key verification in advance. Remxo never a
 
 Unlock decrypts the VaultSession **inside the local Broker process**, not inside one PowerShell window. Later CLI invocations from other terminals reuse that Broker's in-memory session; `vault.json` remains encrypted. Closing a completed CLI invocation or its terminal does not by itself clear the DEK. `remxo status` is the reliable way to check `vault_locked` and `broker_running` in a second terminal.
 
-The Windows launcher starts Broker with `DETACHED_PROCESS`, `CREATE_NEW_PROCESS_GROUP`, and `CREATE_NO_WINDOW`, so the background Broker is not tied to the console process group that launched it. Unix daemon separation before Tokio creation provides the equivalent lifecycle. Unlock state is intentionally lost when the Broker exits, locks, crashes, or the OS restarts. `remxo lock` locks the session, while `remxo lock --stop-broker` additionally requests Broker shutdown for upgrades or an intentional restart. A different `--config` directory or a different OS user has a different Vault/Broker lifecycle; there is no shared plaintext master password in the environment or a saved plaintext session file.
+The Windows launcher starts Broker with `DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP`, so the background Broker is not tied to the console process group that launched it. The ACL PowerShell helper and captured noninteractive SSH/SCP/tunnel processes separately use `CREATE_NO_WINDOW` to prevent visible console popups; interactive SSH/SFTP retain normal terminal behavior. Unix daemon separation before Tokio creation provides the equivalent lifecycle. Unix daemon separation before Tokio creation provides the equivalent lifecycle. Unlock state is intentionally lost when the Broker exits, locks, crashes, or the OS restarts. `remxo lock` locks the session, while `remxo lock --stop-broker` additionally requests Broker shutdown for upgrades or an intentional restart. A different `--config` directory or a different OS user has a different Vault/Broker lifecycle; there is no shared plaintext master password in the environment or a saved plaintext session file.
 
 ## SSH authentication and Vault credentials
 

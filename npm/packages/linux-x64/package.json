@@ -1,6 +1,6 @@
 {
   "name": "@remxo/core-linux-x64",
-  "version": "0.1.0",
+  "version": "0.1.0-rc1",
   "description": "Remxo native core for Linux x64 (glibc)",
   "license": "MIT",
   "publishConfig": {

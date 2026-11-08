@@ -58,6 +58,12 @@ impl ConnectionMode {
     }
 }
 
+const ACTION_TEST_OR_SAVE_TEST: usize = 15;
+const ACTION_SAVE: usize = 16;
+const ACTION_SAVE_EXIT: usize = 17;
+const ACTION_EXIT: usize = 18;
+const LAST_FOCUS: usize = ACTION_EXIT;
+
 struct Draft {
     alias: TextInput,
     mode: ConnectionMode,
@@ -546,6 +552,7 @@ struct Wizard {
     no_color: bool,
     language: crate::config::UiLanguage,
     result: Option<WizardResult>,
+    exit_prompt: bool,
     client: BrokerClient,
     original: Option<Host>,
 }
@@ -593,6 +600,7 @@ impl Wizard {
             no_color,
             language,
             result: None,
+            exit_prompt: false,
             original,
         })
     }
@@ -616,19 +624,19 @@ impl Wizard {
         }
         match key.code {
             KeyCode::Esc => {
-                self.result = Some(WizardResult {
-                    saved_alias: None,
-                    message: self
-                        .language
-                        .text(
-                            "Host creation cancelled. No host configuration was saved; credentials imported during testing or saving remain encrypted in Vault.",
-                            "已取消添加主机，未保存主机配置；测试或保存过程中已导入的凭据仍以密文保留在 Vault 中。",
-                        )
-                        .into(),
-                });
+                self.exit_prompt = true;
+                self.failed = false;
+                self.tested = false;
+                self.message = self
+                    .language
+                    .text(
+                        "Exit: press S to save & exit, Enter to exit without saving, Esc to cancel.",
+                        "退出：按 S 保存并退出，Enter 不保存退出，Esc 取消。",
+                    )
+                    .into();
             }
             KeyCode::Up => self.focused = self.focused.saturating_sub(1),
-            KeyCode::Down => self.focused = (self.focused + 1).min(16),
+            KeyCode::Down => self.focused = (self.focused + 1).min(LAST_FOCUS),
             KeyCode::Left if self.draft.input(self.focused).is_some() => {
                 self.draft.move_left(self.focused)
             }
@@ -645,7 +653,7 @@ impl Wizard {
             KeyCode::Backspace => self.draft.backspace(self.focused),
             KeyCode::Delete => self.draft.delete(self.focused),
             KeyCode::Char(character) => self.draft.type_character(self.focused, character),
-            KeyCode::Tab => self.focused = (self.focused + 1).min(16),
+            KeyCode::Tab => self.focused = (self.focused + 1).min(LAST_FOCUS),
             KeyCode::BackTab => self.focused = self.focused.saturating_sub(1),
             KeyCode::Enter => {
                 if self.focused < 6 {
@@ -660,8 +668,11 @@ impl Wizard {
 
     fn action(&mut self) -> Action {
         match self.focused {
-            15 => Action::Test,
-            16 => Action::Save,
+            ACTION_TEST_OR_SAVE_TEST if self.original.is_some() => Action::SaveTest,
+            ACTION_TEST_OR_SAVE_TEST => Action::Test,
+            ACTION_SAVE => Action::Save,
+            ACTION_SAVE_EXIT => Action::SaveExit,
+            ACTION_EXIT => Action::Exit,
             _ => Action::None,
         }
     }
@@ -671,6 +682,38 @@ enum Action {
     None,
     Test,
     Save,
+    SaveTest,
+    SaveExit,
+    Exit,
+}
+
+async fn save_host(
+    wizard: &mut Wizard,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    paths: &AppPaths,
+    alias: &str,
+    host: &Host,
+) -> Result<Option<String>> {
+    persist_host(wizard, paths, alias, host).await?;
+    configure_sudo_if_requested(wizard, terminal, alias, host).await
+}
+
+fn saved_message(wizard: &Wizard, alias: &str) -> String {
+    match wizard.language {
+        crate::config::UiLanguage::ZhCn => {
+            format!("主机 '{alias}' 已保存。可继续修改，或选择“保存并退出”。")
+        }
+        crate::config::UiLanguage::En => {
+            format!("Host '{alias}' saved. Continue editing, or choose Save & exit.")
+        }
+    }
+}
+
+fn combine_message(warning: Option<String>, message: String) -> String {
+    match warning {
+        Some(warning) if !warning.trim().is_empty() => format!("{warning} {message}"),
+        _ => message,
+    }
 }
 
 async fn persist_host(
@@ -723,116 +766,71 @@ pub async fn attach(
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        match key.code {
-            KeyCode::Enter if wizard.focused >= 15 => match wizard.action() {
-                Action::Test if wizard.original.is_some() => match wizard.draft.host() {
-                    Ok((alias, host)) => {
-                        match persist_host(&mut wizard, paths, &alias, &host).await {
-                            Err(error) => {
-                                wizard.message =
-                                    crate::i18n::error_message(&error, wizard.language);
-                                wizard.failed = true;
-                            }
-                            Ok(()) => {
-                                let sudo_warning = match configure_sudo_if_requested(
-                                    &mut wizard,
-                                    terminal,
-                                    &alias,
-                                    &host,
-                                )
-                                .await
-                                {
-                                    Ok(message) => message,
-                                    Err(error) => Some(match wizard.language {
-                                        crate::config::UiLanguage::ZhCn => {
-                                            format!(
-                                                "sudo 配置失败：{}",
-                                                crate::i18n::error_message(&error, wizard.language)
-                                            )
-                                        }
-                                        crate::config::UiLanguage::En => {
-                                            format!(
-                                                "sudo setup failed: {}",
-                                                crate::i18n::error_message(&error, wizard.language)
-                                            )
-                                        }
-                                    }),
-                                };
-                                match test_connection(paths, &alias, &host, wizard.language, false)
-                                    .await
-                                {
-                                    Ok((message, passed)) => {
-                                        wizard.result = Some(WizardResult {
-                                            saved_alias: Some(alias.clone()),
-                                            message: match (passed, sudo_warning, wizard.language) {
-                                                (true, None, crate::config::UiLanguage::ZhCn) => {
-                                                    format!("主机 '{alias}' 已保存，连接测试通过。")
-                                                }
-                                                (true, None, crate::config::UiLanguage::En) => {
-                                                    format!(
-                                                        "Host '{alias}' saved and its connection test passed."
-                                                    )
-                                                }
-                                                (passed, warning, language) => {
-                                                    let test_message = match (language, passed) {
-                                                        (crate::config::UiLanguage::ZhCn, true) => {
-                                                            format!(
-                                                                "主机 '{alias}' 已保存，连接测试通过。"
-                                                            )
-                                                        }
-                                                        (crate::config::UiLanguage::En, true) => {
-                                                            format!(
-                                                                "Host '{alias}' saved and its connection test passed."
-                                                            )
-                                                        }
-                                                        (
-                                                            crate::config::UiLanguage::ZhCn,
-                                                            false,
-                                                        ) => format!(
-                                                            "主机 '{alias}' 已保存，但连接测试未通过：{message}"
-                                                        ),
-                                                        (crate::config::UiLanguage::En, false) => {
-                                                            format!(
-                                                                "Host '{alias}' was saved, but its connection test failed: {message}"
-                                                            )
-                                                        }
-                                                    };
-                                                    match warning {
-                                                        Some(warning) => {
-                                                            format!("{test_message} {warning}")
-                                                        }
-                                                        None => test_message,
-                                                    }
-                                                }
-                                            },
+        if wizard.exit_prompt {
+            match key.code {
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    wizard.exit_prompt = false;
+                    match wizard.draft.host() {
+                        Ok((alias, host)) => {
+                            match save_host(&mut wizard, terminal, paths, &alias, &host).await {
+                                Err(error) => {
+                                    wizard.message =
+                                        crate::i18n::error_message(&error, wizard.language);
+                                    wizard.failed = true;
+                                }
+                                Ok(warning) => {
+                                    let message =
+                                        warning.unwrap_or_else(|| match wizard.language {
+                                            crate::config::UiLanguage::ZhCn => {
+                                                format!("主机 '{alias}' 已保存并退出。")
+                                            }
+                                            crate::config::UiLanguage::En => {
+                                                format!("Host '{alias}' saved and exited.")
+                                            }
                                         });
-                                        wizard.failed = !passed;
-                                    }
-                                    Err(error) => {
-                                        let message =
-                                            crate::i18n::error_message(&error, wizard.language);
-                                        wizard.result = Some(WizardResult {
-                                            saved_alias: Some(alias.clone()),
-                                            message: match wizard.language {
-                                                crate::config::UiLanguage::ZhCn => format!(
-                                                    "主机 '{alias}' 已保存，但连接测试失败：{message}"
-                                                ),
-                                                crate::config::UiLanguage::En => format!(
-                                                    "Host '{alias}' was saved, but its connection test failed: {message}"
-                                                ),
-                                            },
-                                        });
-                                        wizard.failed = true;
-                                    }
+                                    return Ok(WizardResult {
+                                        saved_alias: Some(alias),
+                                        message,
+                                    });
                                 }
                             }
                         }
+                        Err(error) => {
+                            wizard.message = crate::i18n::error_message(&error, wizard.language);
+                            wizard.failed = true;
+                        }
                     }
-                    Err(error) => {
-                        wizard.message = crate::i18n::error_message(&error, wizard.language);
-                        wizard.failed = true;
-                    }
-                },
+                }
+                KeyCode::Enter => {
+                    return Ok(WizardResult {
+                        saved_alias: None,
+                        message: wizard
+                            .language
+                            .text(
+                                "Exited without saving. Credentials imported during testing or saving remain encrypted in Vault.",
+                                "已退出，未保存主机配置；测试或保存过程中已导入的凭据仍以密文保留在 Vault 中。",
+                            )
+                            .into(),
+                    });
+                }
+                KeyCode::Esc => {
+                    wizard.exit_prompt = false;
+                    wizard.failed = false;
+                    wizard.tested = false;
+                    wizard.message = wizard
+                        .language
+                        .text(
+                            "Exit cancelled. Continue editing or choose an action.",
+                            "已取消退出。可继续编辑或选择操作。",
+                        )
+                        .into();
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match key.code {
+            KeyCode::Enter if wizard.focused >= ACTION_TEST_OR_SAVE_TEST => match wizard.action() {
                 Action::Test => match wizard.draft.host() {
                     Ok((alias, host)) => {
                         let precondition = crate::host::check_can_add(paths, &alias, &host);
@@ -869,45 +867,18 @@ pub async fn attach(
                 },
                 Action::Save => match wizard.draft.host() {
                     Ok((alias, host)) => {
-                        let warning = persist_host(&mut wizard, paths, &alias, &host).await.err();
-                        if let Some(error) = warning {
-                            wizard.message = crate::i18n::error_message(&error, wizard.language);
-                            wizard.failed = true;
-                        } else {
-                            let warning = match configure_sudo_if_requested(
-                                &mut wizard,
-                                terminal,
-                                &alias,
-                                &host,
-                            )
-                            .await
-                            {
-                                Ok(message) => message,
-                                Err(error) => Some(match wizard.language {
-                                    crate::config::UiLanguage::ZhCn => format!(
-                                        "主机 '{alias}' 已保存，但 sudo 配置失败：{}。请继续运行 'remxo vault set-sudo {alias}'。",
-                                        crate::i18n::error_message(&error, wizard.language)
-                                    ),
-                                    crate::config::UiLanguage::En => format!(
-                                        "Host '{alias}' was saved, but sudo configuration failed: {}. Continue with 'remxo vault set-sudo {alias}'.",
-                                        crate::i18n::error_message(&error, wizard.language)
-                                    ),
-                                }),
-                            };
-                            wizard.result = Some(WizardResult {
-                                message: match warning {
-                                    Some(message) => message,
-                                    None => match wizard.language {
-                                        crate::config::UiLanguage::ZhCn => format!(
-                                            "主机 '{alias}' 已保存。可运行 'remxo {alias} <command...>'，或在主机列表中按 Enter。"
-                                        ),
-                                        crate::config::UiLanguage::En => format!(
-                                            "Host '{alias}' saved. Use 'remxo {alias} <command...>' or Enter on the host list."
-                                        ),
-                                    },
-                                },
-                                saved_alias: Some(alias),
-                            });
+                        match save_host(&mut wizard, terminal, paths, &alias, &host).await {
+                            Err(error) => {
+                                wizard.message =
+                                    crate::i18n::error_message(&error, wizard.language);
+                                wizard.failed = true;
+                            }
+                            Ok(warning) => {
+                                let default_message = saved_message(&wizard, &alias);
+                                wizard.message = warning.unwrap_or(default_message);
+                                wizard.failed = false;
+                                wizard.tested = false;
+                            }
                         }
                     }
                     Err(error) => {
@@ -915,13 +886,92 @@ pub async fn attach(
                         wizard.failed = true;
                     }
                 },
+                Action::SaveTest => match wizard.draft.host() {
+                    Ok((alias, host)) => {
+                        match save_host(&mut wizard, terminal, paths, &alias, &host).await {
+                            Err(error) => {
+                                wizard.message =
+                                    crate::i18n::error_message(&error, wizard.language);
+                                wizard.failed = true;
+                            }
+                            Ok(warning) => {
+                                let saved = match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => {
+                                        format!("主机 '{alias}' 已保存。")
+                                    }
+                                    crate::config::UiLanguage::En => {
+                                        format!("Host '{alias}' saved.")
+                                    }
+                                };
+                                match test_connection(paths, &alias, &host, wizard.language, false)
+                                    .await
+                                {
+                                    Ok((message, passed)) => {
+                                        wizard.message =
+                                            combine_message(warning, format!("{saved} {message}"));
+                                        wizard.failed = !passed;
+                                        wizard.tested = passed;
+                                    }
+                                    Err(error) => {
+                                        let message =
+                                            crate::i18n::error_message(&error, wizard.language);
+                                        wizard.message =
+                                            combine_message(warning, format!("{saved} {message}"));
+                                        wizard.failed = true;
+                                        wizard.tested = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        wizard.message = crate::i18n::error_message(&error, wizard.language);
+                        wizard.failed = true;
+                    }
+                },
+                Action::SaveExit => match wizard.draft.host() {
+                    Ok((alias, host)) => {
+                        match save_host(&mut wizard, terminal, paths, &alias, &host).await {
+                            Err(error) => {
+                                wizard.message =
+                                    crate::i18n::error_message(&error, wizard.language);
+                                wizard.failed = true;
+                            }
+                            Ok(warning) => {
+                                let message = warning.unwrap_or_else(|| match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => {
+                                        format!("主机 '{alias}' 已保存并退出。")
+                                    }
+                                    crate::config::UiLanguage::En => {
+                                        format!("Host '{alias}' saved and exited.")
+                                    }
+                                });
+                                wizard.result = Some(WizardResult {
+                                    saved_alias: Some(alias),
+                                    message,
+                                });
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        wizard.message = crate::i18n::error_message(&error, wizard.language);
+                        wizard.failed = true;
+                    }
+                },
+                Action::Exit => {
+                    wizard.exit_prompt = true;
+                    wizard.failed = false;
+                    wizard.tested = false;
+                    wizard.message = wizard
+                            .language
+                            .text(
+                                "Exit: press S to save & exit, Enter to exit without saving, Esc to cancel.",
+                                "退出：按 S 保存并退出，Enter 不保存退出，Esc 取消。",
+                            )
+                            .into();
+                }
                 Action::None => {}
             },
-            KeyCode::Char('t') if wizard.focused == 15 => {
-                if wizard.focused < 16 {
-                    wizard.focused += 1;
-                }
-            }
             other => wizard.handle_key_event(KeyEvent::new(other, key.modifiers)),
         }
         if wizard.result.is_some() {
@@ -1235,7 +1285,9 @@ fn label(index: usize, language: crate::config::UiLanguage) -> &'static str {
         13 => language.text("SSH password / key passphrase", "SSH 密码 / 私钥口令"),
         14 => language.text("Private key file (not .pub)", "私钥文件（不是 .pub）"),
         15 => language.text("[ Test connection ]", "[ 测试连接 ]"),
-        16 => language.text("[ Save host ]", "[ 保存主机 ]"),
+        16 => language.text("[ Save ]", "[ 保存 ]"),
+        17 => language.text("[ Save & exit ]", "[ 保存并退出 ]"),
+        18 => language.text("[ Exit ]", "[ 退出 ]"),
         _ => "",
     }
 }
@@ -1311,12 +1363,12 @@ fn draw(frame: &mut ratatui::Frame, wizard: &Wizard) {
     let start = wizard
         .focused
         .saturating_sub(visible.saturating_sub(1))
-        .min(16usize.saturating_sub(visible.saturating_sub(1)));
+        .min(LAST_FOCUS.saturating_sub(visible.saturating_sub(1)));
     let label_width = body[0].width.saturating_sub(11).min(27) as usize;
     let value_offset = 4 + label_width as u16;
     let value_width = body[0].width.saturating_sub(value_offset + 1).max(1) as usize;
     let mut cursor_position = None;
-    let items = (start..=16.min(start + visible.saturating_sub(1)))
+    let items = (start..=LAST_FOCUS.min(start + visible.saturating_sub(1)))
         .map(|index| {
             let selected = index == wizard.focused;
             let indicator = if selected { " > " } else { "   " };
@@ -1387,8 +1439,8 @@ fn draw(frame: &mut ratatui::Frame, wizard: &Wizard) {
         Line::from(Span::styled(wizard.message.clone(), message_style)),
         Line::from(Span::styled(
             wizard.language.text(
-                "↑/↓ fields · ←/→ cursor/options · Home/End · Backspace/Delete · Ctrl+L clear · Enter next",
-                "↑/↓ 字段 · ←/→ 光标/选项 · Home/End · 退格/Delete · Ctrl+L 清空 · Enter 下一步",
+                "↑/↓ fields · ←/→ cursor/options · Home/End · Backspace/Delete · Ctrl+L clear · Enter action",
+                "↑/↓ 字段 · ←/→ 光标/选项 · Home/End · 退格/Delete · Ctrl+L 清空 · Enter 执行操作",
             ),
             color(wizard.no_color, Color::Gray),
         )),
@@ -1735,8 +1787,48 @@ mod tests {
             .collect::<String>();
         let compact = content.replace(' ', "");
         assert!(compact.contains("测试连接"));
-        assert!(compact.contains("保存主机"));
+        assert!(compact.contains("保存"));
+        assert!(compact.contains("保存并退出"));
+        assert!(compact.contains("退出"));
         assert!(compact.contains("认证方式"));
+    }
+
+    #[test]
+    fn edit_actions_are_bios_style_and_save_test_stays_in_the_wizard() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        crate::config::Config::initialize(&paths.config)
+            .unwrap_or_else(|error| panic!("config: {error}"));
+        let host = Host {
+            hostname: Some("192.0.2.10".into()),
+            ..Host::default()
+        };
+        let mut wizard = Wizard::with_original(
+            &paths,
+            Some("prod-01".into()),
+            Some(host.clone()),
+            Some(host),
+            false,
+        )
+        .unwrap_or_else(|error| panic!("wizard: {error}"));
+        assert_eq!(field_label(&wizard, 15), "[ Save & test ]");
+        assert_eq!(field_label(&wizard, 16), "[ Save ]");
+        assert_eq!(field_label(&wizard, 17), "[ Save & exit ]");
+        assert_eq!(field_label(&wizard, 18), "[ Exit ]");
+
+        wizard.focused = 15;
+        assert!(matches!(wizard.action(), Action::SaveTest));
+        wizard.focused = 16;
+        assert!(matches!(wizard.action(), Action::Save));
+        wizard.focused = 17;
+        assert!(matches!(wizard.action(), Action::SaveExit));
+        wizard.focused = 18;
+        assert!(matches!(wizard.action(), Action::Exit));
+
+        wizard.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(wizard.exit_prompt);
+        assert!(wizard.result.is_none());
     }
 
     #[test]
@@ -1751,7 +1843,7 @@ mod tests {
         wizard.draft.address = TextInput::with_value("example.invalid", 256)
             .unwrap_or_else(|error| panic!("address: {error}"));
         wizard.focused = 16;
-        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(96, 24))
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(96, 36))
             .unwrap_or_else(|error| panic!("terminal: {error}"));
         terminal
             .draw(|frame| draw(frame, &wizard))
@@ -1766,7 +1858,9 @@ mod tests {
         assert!(content.contains("prod-01"));
         assert!(content.contains("Connection"));
         assert!(content.contains("Test connection"));
-        assert!(content.contains("Save host"));
+        assert!(content.contains("Save"));
+        assert!(content.contains("Save & exit"));
+        assert!(content.contains("Exit"));
         assert!(!content.contains('\u{1b}'));
     }
 }

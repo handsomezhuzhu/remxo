@@ -114,18 +114,21 @@ $acl.AddAccessRule($rule)
     let system_root = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
-    let output = std::process::Command::new(
+    let mut command = std::process::Command::new(
         system_root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
-    )
-    .arg("-NoProfile")
-    .arg("-NonInteractive")
-    .arg("-ExecutionPolicy")
-    .arg("Bypass")
-    .arg("-Command")
-    .arg(ACL_SCRIPT)
-    .env("REMXO_PRIVATE_FILE_PATH", path)
-    .output()
-    .map_err(|error| AppError::io("apply Windows ACL to private file", error))?;
+    );
+    command
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(ACL_SCRIPT)
+        .env("REMXO_PRIVATE_FILE_PATH", path);
+    crate::process::without_console_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| AppError::io("apply Windows ACL to private file", error))?;
     if output.status.success() {
         return Ok(());
     }

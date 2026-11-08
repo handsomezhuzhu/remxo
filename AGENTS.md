@@ -26,7 +26,7 @@
 - 使用单个 Cargo 包；保持现有模块边界，最小变更，不为未来阶段提前伪造实现。
 - Rust MSRV 为 1.88；禁止 unsafe，秘密内存使用 zeroize 降低残留但不夸大保证。
 - 安全判断失败必须 fail closed；不关闭 OpenSSH 主机密钥检查，不新增秘密 CLI 参数，不增加默认自动解锁或写重试。
-- 自动 Broker 的 Unix daemon 分离必须在 Tokio 启动线程前完成，禁止在 async runtime 中 fork；保留 PTY 关闭后 Broker 存活和 Vault 状态的回归测试。Windows 使用 detached process + new process group + no-window 方式脱离终端并控制管道继承，必须用独立客户端测试第二次查询，避免读取输出 EOF 将测试阻塞误判为后台退出。
+- 自动 Broker 的 Unix daemon 分离必须在 Tokio 启动线程前完成，禁止在 async runtime 中 fork；保留 PTY 关闭后 Broker 存活和 Vault 状态的回归测试。Windows Broker 使用 detached process + new process group 脱离终端并控制管道继承；ACL PowerShell、非交互 SSH/SCP/tunnel 等后台子进程必须单独使用 CREATE_NO_WINDOW（该标志与 DETACHED_PROCESS 同用会被忽略），真正交互式 SSH/SFTP 不受影响。必须用独立客户端测试第二次查询，避免读取输出 EOF 将测试阻塞误判为后台退出。
 - 隧道不得用固定 sleep 或 bind 前的 `Local forwarding listening on` 预告判定启动成功；等待完整交互初始化并确认子进程仍存活，失败/超时结束本地进程，调试 stderr 不进入日志或 AI 输出。
 - OpenSSH/scp/sftp 使用 argv，不用本地 shell 拼接。POSIX 引用不能套用到其他 shell。
 - `openssh-config`/`external-agent` 非交互保持 `BatchMode=yes`；仅 Vault 模式使用 `BatchMode=no` + `SSH_ASKPASS_REQUIRE=force` + `NumberOfPasswordPrompts=1`。不得给 Vault 认证增加隐式密码重试或错误身份回退。
