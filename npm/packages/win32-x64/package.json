@@ -1,6 +1,6 @@
 {
   "name": "@remxo/core-win32-x64",
-  "version": "0.1.0-rc2",
+  "version": "0.1.0",
   "description": "Remxo native core for Windows x64",
   "license": "MIT",
   "repository": {

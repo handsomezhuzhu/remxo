@@ -10,13 +10,13 @@ native `remxo` executable.
 ## Install
 
 ```console
-npm install -g remxo@rc
+npm install -g remxo
 ```
 
-Use `npm install -g remxo` only after a stable `latest` release has been
-published. Release candidates are published to the `rc` dist-tag.
-
 Requires Node.js 18 or newer.
+
+Release candidates are published to the `rc` dist-tag instead:
+`npm install -g remxo@rc`.
 
 ## Supported platforms
 

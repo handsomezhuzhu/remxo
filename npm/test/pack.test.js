@@ -130,7 +130,7 @@ test('every npm package ships a non-trivial README', () => {
     const contents = fs.readFileSync(source, 'utf8');
     assert.match(contents, /^# /, `${source} must start with a markdown heading`);
     assert.ok(contents.length > 400, `${source} is too short to be a useful package page`);
-    assert.match(contents, /npm install -g remxo@rc/, `${source} must document the install command`);
+    assert.match(contents, /npm install -g remxo(?!@rc)/, `${source} must document the plain install command`);
   }
   for (const manifest of [launcherPackage, ...Object.values(TARGETS).map((target) => (
     require(path.join(__dirname, '..', 'packages', target.key, 'package.json'))

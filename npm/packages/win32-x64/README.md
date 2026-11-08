@@ -7,7 +7,7 @@ of [`remxo`](https://www.npmjs.com/package/remxo), which resolves and validates
 it automatically:
 
 ```console
-npm install -g remxo@rc
+npm install -g remxo
 ```
 
 ## What this package contains

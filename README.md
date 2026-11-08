@@ -10,7 +10,7 @@ Detailed project and architecture documentation is in [`docs/README.md`](docs/RE
 
 | Goal | Command |
 | --- | --- |
-| Install the current release candidate | `npm install -g remxo@rc` |
+| Install the current release | `npm install -g remxo` |
 | Initialize config and Vault | `remxo init --lang zh-CN` |
 | Inspect registered hosts | `remxo hosts` |
 | Run a read-only remote command | `remxo --json prod-01 df -hT` |
@@ -41,13 +41,13 @@ Remxo is a local remote-server inventory, orchestration, and execution tool. It 
 The intended native installation is:
 
 ```console
-npm install -g remxo@rc
+npm install -g remxo
 ```
 
-Use `npm install -g remxo` after a stable `latest` release is published.
+Release candidates are published to the `rc` dist-tag instead: `npm install -g remxo@rc`.
 This requires Node.js 18 or newer. The npm package contains only a small launcher; exact-version optional packages carry precompiled native Rust executables for Windows x64 and Linux x64 (glibc). The launcher selects the package for `process.platform` and `process.arch`, validates its version and vendored binary, then uses `execve` on supported Unix systems or a direct argv/`stdio: inherit` child process on Windows. It does not use a local shell, Node TUI, postinstall download, user-side Cargo build, runtime automatic update, or fallback to an arbitrary `remxo` on PATH. A missing or mismatched platform package fails explicitly. Alpine/musl and other unlisted platforms need a separate native build and verification; the glibc package is not guaranteed to run there. macOS adaptation and package targets are paused until a real Apple device is available for verification, so the current npm optional packages intentionally cover only Windows/Linux.
 
-Release artifacts are built and staged by `.github/workflows/npm-release.yml` on a version tag or manual dispatch. A tag such as `v0.1.0-rc2` stages all three packages with the `rc` dist-tag; a maintainer must approve each staged version with 2FA before it becomes public. A stable tag uses `latest`. The corresponding package version and native `remxo --version` must match exactly. Linux builds, launcher checks and the exact Linux tarball installation smoke test run on `instabox-medium`; only the irreplaceable Windows jobs consume hosted GitHub runners. See the packaging scripts for local artifact staging:
+Release artifacts are built and staged by `.github/workflows/npm-release.yml` on a version tag or manual dispatch. A tag such as `v0.1.0` stages all three packages with the `latest` dist-tag; a prerelease tag such as `v0.1.0-rc3` stages them with `rc` instead. A maintainer must approve each staged version with 2FA before it becomes public. The corresponding package version and native `remxo --version` must match exactly. Linux builds, launcher checks and the exact Linux tarball installation smoke test run on `instabox-medium`; only the irreplaceable Windows jobs consume hosted GitHub runners. See the packaging scripts for local artifact staging:
 
 ```console
 cargo build --release
