@@ -176,7 +176,7 @@ Alias → Connection → Address → Username → Port →
 Auth → Number → Environment → Platform →
 Raw → Approval → sudo → Telnet ack →
 SSH password/passphrase → Private key →
-Test/Save&test → Save
+Test connection / Save / Save & test / Save & exit / Exit
 ```
 
 新建向导的编号默认是当前最大编号 +1；空 environment 显示 `development`；shell 由 platform 推导（Windows→PowerShell，Other→Custom，其余 POSIX）。
@@ -188,7 +188,7 @@ Test/Save&test → Save
 1. 校验草稿；
 2. 先导入 Vault SSH 凭据；
 3. 用 pending Host 执行连接测试，不保存 Host；
-4. 失败可继续修改；Esc 不保存 Host。
+4. 失败可继续修改；Esc 会进入退出确认，不会直接丢弃。
 
 新建 Save：
 
@@ -198,7 +198,14 @@ Test/Save&test → Save
 4. 是否先 Test 成功不是直接 Save 的前置条件；
 5. 可选 sudo 在 Host 保存后另行配置。
 
-因此：Test 失败或 Esc 不保存 Host，但已导入的秘密仍加密留在 Vault；sudo 失败不回滚 Host；这不是 config+Vault 全事务。
+动作边界：
+
+- `Save` 保存后留在向导；
+- `Save & test` 保存后测试并留在向导；
+- `Save & exit` 保存后退出；
+- `Exit` 询问是否保存：`S` 保存并退出，Enter 不保存退出，Esc 取消。
+
+因此：Test 失败不保存 Host，但已导入的秘密仍加密留在 Vault；sudo 失败不回滚 Host；这不是 config+Vault 全事务。
 
 ### 编辑
 

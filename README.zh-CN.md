@@ -186,12 +186,12 @@ Home / End     移动到文本字段开头/结尾
 Backspace      删除光标前一个字符
 Delete         删除光标处字符
 Ctrl+U/W/L     删至开头 / 删除前一个词 / 清空字段
-Enter          下一步、测试、保存或保存并测试
+Enter          执行当前焦点操作：测试、保存、保存并测试、保存并退出或退出
 Tab / BackTab  移动字段焦点
-Esc            取消且不保存 Host
+Esc            询问是否保存：S 保存并退出，Enter 不保存退出，Esc 取消
 ```
 
-凭据导入有意**不是**全事务的 Host 操作。新建 Host 时，Test 和 Save 都会先把选择的 SSH 密码/口令和/或私钥导入加密 Vault。Test 失败或按 Esc 不保存 Host，但已导入的凭据仍以密文留在 Vault。Save 仅在 SSH 凭据导入成功后写入 Host；直接 Save 不要求此前成功执行过 Test。可选 sudo 在 Host 保存后另行配置，sudo 失败不会回滚 Host。任何秘密值都不会进入预览、Host 对象、argv 或元数据审计。
+凭据导入有意**不是**全事务的 Host 操作。新建 Host 时，Test 会先把选择的 SSH 密码/口令和/或私钥导入加密 Vault。Test 失败不保存 Host，但已导入的凭据仍以密文留在 Vault。Save 仅在 SSH 凭据导入成功后写入 Host；直接 Save 不要求此前成功执行过 Test。`Save` 保存后留在向导，`Save & exit` 保存后退出，`Exit` 会询问是否保存。可选 sudo 在 Host 保存后另行配置，sudo 失败不会回滚 Host。任何秘密值都不会进入预览、Host 对象、argv 或元数据审计。
 
 `host edit` 固定 alias，并通过 expected-Host 检查防止旧表单静默覆盖更新后的配置。仅修改非秘密字段会沿用现有凭据，不要求重新输入。显式更换凭据或认证方式会使用带版本的 credential stem，因此 Host 保存失败不会在配置引用切换前替换旧 Host 正在使用的秘密。旧凭据仍以密文保留，不承诺配置与 Vault 的整体回滚，也不自动安全删除。保存并测试会先写入编辑后的 Host，再按正式登记 Host 的连接测试路径执行；已登记 alias 不使用 pending Host。测试失败不会回滚已经保存的编辑。
 

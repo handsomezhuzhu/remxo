@@ -181,12 +181,12 @@ Paste          Insert at the cursor (bracketed paste)
 Backspace      Delete before the cursor
 Delete         Delete at the cursor
 Ctrl+U/W/L     Delete to start / previous word / clear the field
-Enter          Advance, test, save, or save-and-test
+Enter          Run the focused action: Test, Save, Save & test, Save & exit, or Exit
 Tab / BackTab  Move field focus
-Esc            Cancel without saving the Host
+Esc            Ask whether to save: S saves and exits, Enter exits without saving, Esc cancels
 ```
 
-Credential import is deliberately **not** an all-or-nothing Host transaction. For host creation, Test and Save first import the selected SSH password/passphrase and/or private key into the encrypted Vault. A failed test or Esc does not save the Host, but credentials already imported remain encrypted in Vault. Save writes the Host only after its SSH credential import succeeds; a direct Save does not require a prior successful test. Optional sudo configuration happens separately after the Host is saved, and sudo failure does not roll back that Host. No secret value enters the preview, Host object, argv, or metadata audit.
+Credential import is deliberately **not** an all-or-nothing Host transaction. For host creation, Test first imports the selected SSH password/passphrase and/or private key into the encrypted Vault. A failed test does not save the Host, but credentials already imported remain encrypted in Vault. Save writes the Host only after its SSH credential import succeeds; a direct Save does not require a prior successful test. `Save` stays in the wizard, `Save & exit` leaves after saving, and `Exit` asks whether to save. Optional sudo configuration happens separately after the Host is saved, and sudo failure does not roll back that Host. No secret value enters the preview, Host object, argv, or metadata audit.
 
 For `host edit`, the alias is fixed and a stale expected-Host check prevents an old form from silently overwriting a newer edit. Nonsecret edits retain the current credential records without asking for them again. An explicit credential or authentication-mode replacement uses a versioned credential stem so a failed Host save does not replace the old Host's active secret before the configuration reference changes. Old records remain encrypted; there is no cross-config/Vault rollback or automatic secure deletion. Save & test writes the edited Host first and tests it through the registered-Host authentication path—never a pending Host for an already registered alias. A failed test does not roll back the saved edit.
 

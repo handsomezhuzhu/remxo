@@ -95,7 +95,7 @@ Remxo 复用系统 OpenSSH，不自行实现 SSH 协议。
 
 向导不是全事务：
 
-- Test 失败或 Esc 不保存 Host，但已导入的秘密仍加密留在 Vault。
+- Test 失败不保存 Host，但已导入的秘密仍加密留在 Vault；退出确认中的 `S` 才会保存并退出。
 - 直接 Save 在 SSH 凭据成功后保存 Host，不要求先成功 Test。
 - sudo 在 Host 保存后独立配置，失败不回滚 Host。
 - Save & test 先保存，再按登记 Host 测试；失败不回滚配置。

@@ -581,7 +581,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             "interactive host form",
             [
                 (b"styled", b"\x1b[B\x1b[Bexample.invalid\r\r\r"),
-                (b"", b"\x1b[B\r"),
+                (b"", b"\x1b[B\x1b[B\r"),
             ],
             completion=lambda: (self.original / "audit.jsonl").exists(),
         ).run()
@@ -625,7 +625,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
         keys = (
             b"\x1b[B\x1b[B"
             + b"\x1b[H\x1b[3~\x1b[F.new"
-            + b"\x1b[B" * 14
+            + b"\x1b[B" * 15
             + b"\r"
         )
         result = PtyCommand(
@@ -695,7 +695,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             "Vault password wizard test then save",
             [
                 (b"wizardpass", first_keys),
-                (b"", b"\x1b[B\r"),
+                (b"", b"\x1b[B\x1b[B\r"),
             ],
             completion=lambda: (self.original / "audit.jsonl").exists(),
         ).run()
@@ -771,7 +771,7 @@ class RemxoPtyAcceptanceTest(unittest.TestCase):
             "Vault private key wizard test then save",
             [
                 (b"wizardkey", first_keys),
-                (b"", b"\x1b[B\r"),
+                (b"", b"\x1b[B\x1b[B\r"),
             ],
             completion=lambda: (self.original / "audit.jsonl").exists(),
         ).run()
