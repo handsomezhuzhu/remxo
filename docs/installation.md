@@ -147,12 +147,12 @@ node scripts/npm/pack.js --main --out target/npm/launcher
 
 ```console
 # Windows
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-win32-x64-0.1.0-rc1.tgz
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.0-rc1.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-win32-x64-0.1.0-rc2.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.0-rc2.tgz
 
 # Linux
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-linux-x64-0.1.0-rc1.tgz
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.0-rc1.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-linux-x64-0.1.0-rc2.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.0-rc2.tgz
 ```
 
 安装后执行 `remxo --version`。如版本发生变化，应将示例中的 `0.1.0` 和所有对应包版本一起更新，不能混用不同版本的 launcher/core。
