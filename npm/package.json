@@ -3,6 +3,10 @@
   "version": "0.1.0-rc1",
   "description": "Remote execution for humans and agents",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/handsomezhuzhu/remxo"
+  },
   "bin": {
     "remxo": "bin/remxo.js"
   },

@@ -3,6 +3,10 @@
   "version": "0.1.0-rc1",
   "description": "Remxo native core for Linux x64 (glibc)",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/handsomezhuzhu/remxo"
+  },
   "publishConfig": {
     "access": "public"
   },
