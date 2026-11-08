@@ -49,9 +49,14 @@ remxo prod-01 df -hT
 remxo --json prod-01 ls -la
 ```
 
-On a fresh install `remxo status` reports an empty inventory, and adding a host
-tells you to run `remxo init` first. Master and backup passwords must be at
-least 12 bytes and are only accepted at hidden interactive-terminal prompts.
+On a fresh install `remxo status` reports an empty inventory **and appends a
+`Next:` line naming the single command to run** — `remxo init`, `remxo unlock`,
+or `remxo host add <alias>`, depending on how far setup has progressed. Once the
+Vault is unlocked and at least one host is registered, that line disappears so an
+established installation stays quiet. `--json` output is never extended with it.
+
+Master and backup passwords must be at least 12 bytes and are only accepted at
+hidden interactive-terminal prompts.
 
 ## What the launcher does not do
 

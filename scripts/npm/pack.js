@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { assertCoreFile } = require('../../npm/lib/core');
 const { TARGETS } = require('../../npm/lib/targets');
-const { NPM_DIR, coreManifest, mainManifest, writeManifest } = require('./manifest');
+const { NPM_DIR, ROOT_DIR, coreManifest, mainManifest, writeManifest } = require('./manifest');
 
 function findNpmCli(env = process.env) {
   const candidates = [];
@@ -86,6 +86,9 @@ function stageMain(directory, version) {
   // npm renders this file on the package page. Copying it explicitly keeps the
   // staged package self-contained instead of relying on the repository root.
   fs.copyFileSync(path.join(NPM_DIR, 'README.md'), path.join(directory, 'README.md'));
+  // npm only auto-includes a LICENSE that exists in the packed directory, and
+  // this directory is assembled from scratch, so copy it in explicitly.
+  fs.copyFileSync(path.join(ROOT_DIR, 'LICENSE'), path.join(directory, 'LICENSE'));
 }
 
 function stageCore(directory, platform, artifact, version, options = {}) {
@@ -103,6 +106,7 @@ function stageCore(directory, platform, artifact, version, options = {}) {
     path.join(NPM_DIR, 'packages', platform, 'README.md'),
     path.join(directory, 'README.md'),
   );
+  fs.copyFileSync(path.join(ROOT_DIR, 'LICENSE'), path.join(directory, 'LICENSE'));
   return destination;
 }
 

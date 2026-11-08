@@ -412,36 +412,7 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             emit(
                 &status,
                 cli.json,
-                &match language {
-                    crate::config::UiLanguage::ZhCn => format!(
-                        "Vault：{}\nBroker：{}\n主机：{}",
-                        if status.vault_locked {
-                            "已锁定"
-                        } else {
-                            "已解锁"
-                        },
-                        if status.broker_running {
-                            "运行中"
-                        } else {
-                            "已停止"
-                        },
-                        status.hosts
-                    ),
-                    crate::config::UiLanguage::En => format!(
-                        "Vault: {}\nBroker: {}\nHosts: {}",
-                        if status.vault_locked {
-                            "locked"
-                        } else {
-                            "unlocked"
-                        },
-                        if status.broker_running {
-                            "running"
-                        } else {
-                            "stopped"
-                        },
-                        status.hosts
-                    ),
-                },
+                &status_report_text(&status, language, &paths),
             )?;
         }
         Some(Action::Unlock) => {
@@ -761,9 +732,21 @@ async fn dispatch(mut cli: Cli) -> Result<u8> {
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
                 crate::tui::run_with_options(paths, cli.no_color).await?;
             } else {
-                return Err(AppError::invalid_argument(
-                    "no TTY detected; use remxo --help or provide <target> <command...> (TUI was not started)",
-                ));
+                let mut message = language
+                    .text(
+                        "no TTY detected; use remxo --help or provide <target> <command...> (TUI was not started)",
+                        "未检测到 TTY；请使用 remxo --help，或提供 <目标> <命令...>（未启动 TUI）",
+                    )
+                    .to_string();
+                // Only file-certain states are reported here; guessing the Vault
+                // lock state would need a Broker round-trip on an error path.
+                if let Some(hint) =
+                    crate::onboarding::Onboarding::from_files(&paths).and_then(|s| s.hint(language))
+                {
+                    message.push('\n');
+                    message.push_str(hint);
+                }
+                return Err(AppError::invalid_argument(message));
             }
         }
     }
@@ -1419,6 +1402,49 @@ fn print_operation(
     Ok(())
 }
 
+fn status_report_text(
+    status: &StatusReport,
+    language: crate::config::UiLanguage,
+    paths: &AppPaths,
+) -> String {
+    let summary = match language {
+        crate::config::UiLanguage::ZhCn => format!(
+            "Vault：{}\nBroker：{}\n主机：{}",
+            if status.vault_locked {
+                "已锁定"
+            } else {
+                "已解锁"
+            },
+            if status.broker_running {
+                "运行中"
+            } else {
+                "已停止"
+            },
+            status.hosts
+        ),
+        crate::config::UiLanguage::En => format!(
+            "Vault: {}\nBroker: {}\nHosts: {}",
+            if status.vault_locked {
+                "locked"
+            } else {
+                "unlocked"
+            },
+            if status.broker_running {
+                "running"
+            } else {
+                "stopped"
+            },
+            status.hosts
+        ),
+    };
+    match crate::onboarding::Onboarding::detect(paths, status.vault_locked, status.hosts)
+        .hint(language)
+    {
+        Some(hint) => format!("{summary}\n{hint}"),
+        None => summary,
+    }
+}
+
 fn emit(value: &impl Serialize, json: bool, human: &str) -> Result<()> {
     if json {
         println!(
@@ -1814,6 +1840,42 @@ mod tests {
             );
         }
         assert!(validate_askpass_prompt(None).is_err());
+    }
+
+    #[test]
+    fn status_report_adds_a_next_step_only_while_setup_is_incomplete() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+
+        let fresh = StatusReport {
+            schema_version: 1,
+            vault_exists: false,
+            vault_locked: true,
+            broker_running: false,
+            hosts: 0,
+            agent_available: None,
+        };
+        let english = status_report_text(&fresh, crate::config::UiLanguage::En, &paths);
+        assert!(english.contains("Vault: locked"), "{english}");
+        assert!(english.contains("Next: remxo init"), "{english}");
+
+        let chinese = status_report_text(&fresh, crate::config::UiLanguage::ZhCn, &paths);
+        assert!(chinese.contains("下一步：remxo init"), "{chinese}");
+
+        // A ready installation must not repeat advice.
+        std::fs::write(&paths.config, "version = 1\n[settings]\nlanguage = 'en'\n")
+            .unwrap_or_else(|error| panic!("write config: {error}"));
+        std::fs::write(paths.vault(), "{}\n")
+            .unwrap_or_else(|error| panic!("write vault: {error}"));
+        let ready = StatusReport {
+            vault_exists: true,
+            vault_locked: false,
+            hosts: 2,
+            ..fresh
+        };
+        let quiet = status_report_text(&ready, crate::config::UiLanguage::En, &paths);
+        assert!(!quiet.contains("Next:"), "{quiet}");
     }
 
     #[test]

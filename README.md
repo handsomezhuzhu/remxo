@@ -269,3 +269,7 @@ Remote output is untrusted data. Redaction and control-character handling reduce
 - Biometric unlock, Linux Secret Service, TPM, an L2 separate-OS-user Broker, and L3 short-lived certificates/central authorization are not implemented.
 
 Architecture is documented in [ARCHITECTURE.md](ARCHITECTURE.md), security verification in [TESTING.md](TESTING.md), and AI development/usage rules in [AGENTS.md](AGENTS.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE). The same license text ships inside every npm package, including the optional platform cores.

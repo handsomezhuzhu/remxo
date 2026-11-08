@@ -11,6 +11,7 @@ pub mod hostkey;
 pub mod i18n;
 pub mod masked_prompt;
 pub mod model;
+pub mod onboarding;
 pub mod output;
 pub mod policy;
 pub mod process;

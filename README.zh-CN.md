@@ -269,3 +269,7 @@ SCP 使用 `scp -s` 强制 SFTP 模式，避免 legacy SCP 的远端 shell 路�
 - 生物识别解锁、Linux Secret Service、TPM、L2 独立 OS 用户 Broker、L3 短期证书与集中授权尚未实现。
 
 架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，安全验证见 [TESTING.md](TESTING.md)，AI 使用与开发约定见 [AGENTS.md](AGENTS.md)。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。该许可文本同时随每个 npm 包发布，包括 optional 平台核心包。

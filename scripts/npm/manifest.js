@@ -5,8 +5,8 @@ const path = require('node:path');
 const { TARGETS } = require('../../npm/lib/targets');
 const { readManifest } = require('../../npm/lib/core');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const NPM_DIR = path.join(ROOT, 'npm');
+const ROOT_DIR = path.resolve(__dirname, '..', '..');
+const NPM_DIR = path.join(ROOT_DIR, 'npm');
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function checkedVersion(version) {
@@ -43,4 +43,4 @@ function writeManifest(directory, manifest) {
   fs.writeFileSync(path.join(directory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-module.exports = { NPM_DIR, ROOT, coreManifest, mainManifest, writeManifest };
+module.exports = { NPM_DIR, ROOT_DIR, coreManifest, mainManifest, writeManifest };

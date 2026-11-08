@@ -59,6 +59,8 @@ remxo --json status
 remxo doctor
 ```
 
+安装完成后 npm 本身不打印任何横幅（没有 `postinstall`）。引导由原生 CLI 在人类可读输出里提供：`remxo status` 会依据本地文件与主机数量追加一行"下一步"，分别提示 `remxo init`、`remxo unlock` 或 `remxo host add`；初始化完成且已有主机后不再显示。`--json` 输出保持单一机器可读文档，不附加引导文本。
+
 首次运行还需要初始化和登记主机，见 [项目文档](README.md#初始化与首次连接)。
 
 ## 源码构建
@@ -147,15 +149,15 @@ node scripts/npm/pack.js --main --out target/npm/launcher
 
 ```console
 # Windows
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-win32-x64-0.1.0.tgz
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.0.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-win32-x64-0.1.1.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.1.tgz
 
 # Linux
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-linux-x64-0.1.0.tgz
-npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.0.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-core-linux-x64-0.1.1.tgz
+npm install --global --ignore-scripts --omit=optional ./artifacts/remxo-0.1.1.tgz
 ```
 
-安装后执行 `remxo --version`。如版本发生变化，应将示例中的 `0.1.0` 和所有对应包版本一起更新，不能混用不同版本的 launcher/core。
+安装后执行 `remxo --version`。如版本发生变化，应将示例中的 `0.1.1` 和所有对应包版本一起更新，不能混用不同版本的 launcher/core。
 
 ## 数据目录与隔离运行
 

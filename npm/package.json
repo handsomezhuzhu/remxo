@@ -1,6 +1,6 @@
 {
   "name": "remxo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Remote execution for humans and agents",
   "license": "MIT",
   "repository": {
@@ -19,8 +19,8 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@remxo/core-linux-x64": "0.1.0",
-    "@remxo/core-win32-x64": "0.1.0"
+    "@remxo/core-linux-x64": "0.1.1",
+    "@remxo/core-win32-x64": "0.1.1"
   },
   "scripts": {
     "test": "node --test"

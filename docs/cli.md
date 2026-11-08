@@ -52,6 +52,7 @@ remxo hosts
 - 主密码与备份密码至少 12 字节，只通过隐藏提示输入。
 - `doctor` 不带 alias 检查本地配置与 OpenSSH；带 alias 时对该 Host 执行有界 `true` 连接测试。
 - `lock` 只锁定 Vault 会话；`--stop-broker` 额外请求 Broker 关闭。
+- `status` 在人类可读输出里，若安装尚未就绪会追加一行下一步提示（未初始化/中断的 init/已锁定/无主机）；已解锁且有主机后不再显示。`--json status` 不受影响，仍只输出状态文档。
 
 ## 主机管理
 

@@ -139,6 +139,28 @@ test('every npm package ships a non-trivial README', () => {
   }
 });
 
+test('every npm package ships the repository LICENSE', (t) => {
+  const license = fs.readFileSync(path.join(__dirname, '..', '..', 'LICENSE'), 'utf8');
+  assert.match(license, /^MIT License\n/, 'LICENSE must be the MIT license text');
+  assert.match(license, /Copyright \(c\) \d{4} /, 'LICENSE must carry a copyright line');
+
+  const directory = temporaryDirectory(t);
+  const artifact = path.join(directory, 'local remxo.exe');
+  fs.writeFileSync(artifact, 'small test fixture');
+  fs.chmodSync(artifact, 0o755);
+  const staged = path.join(directory, 'package');
+  stageCore(staged, 'win32-x64', artifact, '2.0.0', {
+    spawnSync: () => ({ status: 0, signal: null, stdout: 'remxo 2.0.0\n', stderr: '' }),
+  });
+  assert.equal(fs.readFileSync(path.join(staged, 'LICENSE'), 'utf8'), license);
+
+  for (const manifest of [launcherPackage, ...Object.values(TARGETS).map((target) => (
+    require(path.join(__dirname, '..', 'packages', target.key, 'package.json'))
+  ))]) {
+    assert.equal(manifest.license, 'MIT', `${manifest.name} must declare MIT`);
+  }
+});
+
 test('packed launcher passes argv and exit status without optional registry access', (t) => {
   const directory = temporaryDirectory(t);
   const env = {
@@ -159,6 +181,11 @@ test('packed launcher passes argv and exit status without optional registry acce
     fs.readFileSync(path.join(unpacked, 'README.md'), 'utf8'),
     /^# remxo/,
     'packed launcher must ship its README for the npm package page',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(unpacked, 'LICENSE'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', '..', 'LICENSE'), 'utf8'),
+    'packed launcher must ship the repository LICENSE',
   );
   assert.equal(fs.existsSync(path.join(unpacked, 'node_modules')), false);
 
