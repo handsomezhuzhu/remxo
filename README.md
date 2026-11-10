@@ -111,7 +111,7 @@ Global options before the target include `--json`, `--no-color`, `--timeout`, `-
 
 In `openssh-config`/`external-agent` modes, no command on a TTY opens interactive SSH; no command without a TTY is a usage error. Bare `remxo` enters the TUI only on a real interactive TTY. Subcommand names and global-option positions are reserved, so host aliases must not conflict with them. The TUI host-list **Enter** path supplies Broker authentication context for Vault-managed interactive SSH.
 
-A human should perform first-use host-key verification in advance. Remxo never adds `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`, or `ForwardAgent=yes`. Use `remxo host key fetch <alias>` to inspect fingerprints and `remxo host key trust <alias> --fingerprint SHA256:...` after out-of-band verification.
+A human should perform first-use host-key verification in advance. Remxo never adds `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`, or `ForwardAgent=yes`. Use `remxo host key fetch <alias>` to inspect fingerprints and `remxo host key trust <alias> --fingerprint SHA256:...` after out-of-band verification. Interactive confirmation is bound to the displayed key set: if a subsequent fetch returns different keys, Remxo rejects the write and requires fresh verification rather than trusting the new response. The wizard invalidates stale key confirmations when its connection endpoint changes. Already-registered keys are detected per public-key blob and only missing confirmed keys are appended, including when OpenSSH hashes hostnames.
 
 `remxo doctor [alias]` first validates local configuration and explicitly, on request, probes one saved Host with a bounded POSIX `true` handshake through the same authentication preparation. It reports the result without weakening host-key checks or issuing a write command; it is not an automatic background health monitor.
 
@@ -196,7 +196,7 @@ The UI layout draws on Charmbracelet/gum's stepped inputs, lazygit's keyboard pa
 
 ## Policy and approval
 
-A host supports `raw_mode = "allow" | "read-only" | "deny"` and `approval = "never" | "writes" | "always"`. `read-only` permits only built-in profiles; `deny` prohibits raw execution. Heuristics only choose approval convenience and are **not a command-security sandbox**. Once raw execution is allowed, the remote account's own permissions apply.
+A host supports `raw_mode = "allow" | "read-only" | "deny"` and `approval = "never" | "writes" | "always"`. `read-only` permits only built-in profiles; `deny` prohibits raw execution. Under `writes`, recognized reads include ordinary `ls`/`df`/`free`/`ps`/`cat`/`uname`, argument-free `pwd`/`uptime`/`whoami`, `systemctl status`, and narrowly checked `hostname`/`date` queries, read forms of `journalctl` and `git status/log/show/diff/branch`. Unknown commands, ambiguous options, writes, shell operators and sudo use the approval result or fail closed; supporting arguments after plain `whoami`/`uptime`/`pwd` are an intentional narrowing of convenience, not command execution blocking. This is **not a command-security sandbox**. Once raw execution is allowed, the remote account's own permissions apply.
 
 When approval is required, execution returns `approval_required` and an `approval_id`; an AI must stop. After human review:
 

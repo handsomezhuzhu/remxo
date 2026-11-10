@@ -112,7 +112,7 @@ target 前的全局参数包括 `--json`、`--no-color`、`--timeout`、`--max-o
 
 在 `openssh-config`/`external-agent` 模式下，TTY 中无 command 会打开交互式 SSH；非 TTY 无 command 是用法错误。裸 `remxo` 只在真正的交互 TTY 中进入 TUI。子命令名和全局选项位置保留给 CLI，主机别名不应与之冲突。TUI 主机列表中的 **Enter** 路径会为 Vault 管理的交互式 SSH 提供 Broker 认证上下文。
 
-与 OpenSSH 首次连接所需的主机密钥确认应由人类提前完成。Remxo 从不自动添加 `StrictHostKeyChecking=no`、`UserKnownHostsFile=/dev/null` 或 `ForwardAgent=yes`。可先用 `remxo host key fetch <alias>` 查看指纹，人工核对后用 `remxo host key trust <alias> --fingerprint SHA256:...` 登记。
+与 OpenSSH 首次连接所需的主机密钥确认应由人类提前完成。Remxo 从不自动添加 `StrictHostKeyChecking=no`、`UserKnownHostsFile=/dev/null` 或 `ForwardAgent=yes`。可先用 `remxo host key fetch <alias>` 查看指纹，人工核对后用 `remxo host key trust <alias> --fingerprint SHA256:...` 登记。交互确认绑定展示的密钥集合：后续抓取得到不同密钥时拒绝写入，要求重新人工核对，不会信任未经确认的新响应。向导的连接端点改变后，旧密钥确认会失效。登记前逐个按公钥类型和 blob 查重，只追加已确认且缺失的密钥；即使 OpenSSH 哈希了主机名也不依赖整行文本比较。
 
 `remxo doctor [alias]` 先检查本地配置；指定 alias 时，才按用户显式操作，通过同一套认证准备对保存的 Host 执行有界的 POSIX `true` 握手。它报告连接结果，不放宽主机密钥检查，不执行写入命令，也不会在后台自动监视连接。
 
@@ -197,7 +197,7 @@ UI 布局参考了 Charmbracelet/gum 的分步输入、lazygit 的键盘面板/�
 
 ## 策略与审批
 
-主机支持 `raw_mode = "allow" | "read-only" | "deny"` 和 `approval = "never" | "writes" | "always"`。`read-only` 只允许内置 profile；`deny` 禁止 raw 执行。启发式只用于决定审批便利性，**不是命令安全沙箱**。raw 一旦允许，就意味着远程账号本身的权限。
+主机支持 `raw_mode = "allow" | "read-only" | "deny"` 和 `approval = "never" | "writes" | "always"`。`read-only` 只允许内置 profile；`deny` 禁止 raw 执行。在 `writes` 下，识别为读取的包括普通 `ls`/`df`/`free`/`ps`/`cat`/`uname`、不带参数的 `pwd`/`uptime`/`whoami`、`systemctl status`，以及收紧检查后的 `hostname`/`date` 查询和 `journalctl`、`git status/log/show/diff/branch` 读取形式。未知命令、歧义选项、写入、shell 操作符和 sudo 按审批结果处理或 fail closed；对 `whoami`/`uptime`/`pwd` 的参数改为要求人工确认，是免审批便利性的有意收窄，并非禁止执行。此判断**不是命令安全沙箱**。raw 一旦允许，就意味着远程账号本身的权限。
 
 需要审批时，执行返回 `approval_required` 和 `approval_id`，AI 应停止。人类审查后：
 

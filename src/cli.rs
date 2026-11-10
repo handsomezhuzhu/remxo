@@ -1038,16 +1038,24 @@ fn host_key_command(
             fingerprint,
         } => {
             let resolved = resolve_target(&config, &target)?;
-            if fingerprint.is_none() {
+            let result = if let Some(fingerprint) = fingerprint.as_deref() {
+                crate::hostkey::trust_with_retries(
+                    &resolved.alias,
+                    &resolved.host,
+                    Some(fingerprint),
+                    retries,
+                )?
+            } else {
                 let keys = crate::hostkey::fetch_with_retries(&resolved.host, retries)?;
                 crate::hostkey::confirm_trust_interactively(&keys)?;
-            }
-            let result = crate::hostkey::trust_with_retries(
-                &resolved.alias,
-                &resolved.host,
-                fingerprint.as_deref(),
-                retries,
-            )?;
+                crate::hostkey::trust_confirmed(
+                    &resolved.alias,
+                    &resolved.host,
+                    &keys,
+                    None,
+                    retries,
+                )?
+            };
             let human = if result.added.is_empty() {
                 match language {
                     crate::config::UiLanguage::ZhCn => {
@@ -1064,12 +1072,31 @@ fn host_key_command(
                     .map(|key| format!("{} {}", key.key_type, key.fingerprint))
                     .collect::<Vec<_>>()
                     .join("; ");
-                match language {
-                    crate::config::UiLanguage::ZhCn => {
-                        format!("已信任主机 '{}' 的主机密钥：{}。", result.host, added)
+                if result.already_known.is_empty() {
+                    match language {
+                        crate::config::UiLanguage::ZhCn => {
+                            format!("已信任主机 '{}' 的主机密钥：{}。", result.host, added)
+                        }
+                        crate::config::UiLanguage::En => {
+                            format!("Trusted host '{}' key: {}.", result.host, added)
+                        }
                     }
-                    crate::config::UiLanguage::En => {
-                        format!("Trusted host '{}' key: {}.", result.host, added)
+                } else {
+                    let existing = result
+                        .already_known
+                        .iter()
+                        .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    match language {
+                        crate::config::UiLanguage::ZhCn => format!(
+                            "主机 '{}' 已新增密钥：{}；已有密钥：{}。",
+                            result.host, added, existing
+                        ),
+                        crate::config::UiLanguage::En => format!(
+                            "Host '{}' added keys: {}; already known: {}.",
+                            result.host, added, existing
+                        ),
                     }
                 }
             };

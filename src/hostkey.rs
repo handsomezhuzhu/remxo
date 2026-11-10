@@ -21,6 +21,8 @@ pub struct HostKeyFingerprint {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FetchedHostKey {
     pub key_type: String,
+    pub protocol_key_type: String,
+    pub key_blob: String,
     pub fingerprint: String,
     pub line: String,
 }
@@ -40,6 +42,7 @@ pub struct HostKeyTrustResult {
     pub address: String,
     pub port: u16,
     pub added: Vec<HostKeyFingerprint>,
+    pub already_known: Vec<HostKeyFingerprint>,
     pub known_hosts: PathBuf,
 }
 
@@ -175,10 +178,12 @@ fn parse_host_key_lines(output: &str) -> Result<Vec<FetchedHostKey>> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| {
-            let fingerprint = fingerprint_from_public_key_line(line)?;
+            let identity = identity_from_public_key_line(line)?;
             Ok(FetchedHostKey {
-                key_type: fingerprint.key_type.clone(),
-                fingerprint: fingerprint.fingerprint,
+                key_type: identity.fingerprint.key_type,
+                protocol_key_type: identity.key_type,
+                key_blob: identity.blob,
+                fingerprint: identity.fingerprint.fingerprint,
                 line: line.to_string(),
             })
         })
@@ -240,12 +245,43 @@ pub(crate) fn fetch_once(host: &Host) -> Result<Vec<FetchedHostKey>> {
     Ok(keys)
 }
 
-fn known_host_keys(host: &Host) -> Result<Vec<HostKeyFingerprint>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostKeyIdentity {
+    key_type: String,
+    blob: String,
+    fingerprint: HostKeyFingerprint,
+}
+
+fn identity_from_public_key_line(line: &str) -> Result<HostKeyIdentity> {
+    let mut fields = line.split_whitespace();
+    let _name = fields
+        .next()
+        .ok_or_else(|| AppError::invalid_argument("host key line has no name"))?;
+    let key_type = fields
+        .next()
+        .ok_or_else(|| AppError::invalid_argument("host key line has no key type"))?;
+    let blob = fields
+        .next()
+        .ok_or_else(|| AppError::invalid_argument("host key line has no key blob"))?;
+    BASE64
+        .decode(blob)
+        .map_err(|_| AppError::invalid_argument("host key blob is not valid base64"))?;
+    let fingerprint = fingerprint_from_public_key_line(line)?;
+    Ok(HostKeyIdentity {
+        key_type: key_type.to_string(),
+        blob: blob.to_string(),
+        fingerprint,
+    })
+}
+
+fn known_host_identities(host: &Host) -> Result<Vec<HostKeyIdentity>> {
     let (address, port) = endpoint(host)?;
     let name = known_hosts_name(&address, port);
     let output = Command::new(keygen_binary())
         .arg("-F")
         .arg(&name)
+        .arg("-f")
+        .arg(known_hosts_path()?)
         .output()
         .map_err(|error| AppError::io("inspect OpenSSH known_hosts", error))?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -256,8 +292,15 @@ fn known_host_keys(host: &Host) -> Result<Vec<HostKeyFingerprint>> {
         .collect::<Vec<_>>();
     key_lines
         .into_iter()
-        .map(fingerprint_from_public_key_line)
+        .map(identity_from_public_key_line)
         .collect()
+}
+
+fn known_host_keys(host: &Host) -> Result<Vec<HostKeyFingerprint>> {
+    Ok(known_host_identities(host)?
+        .into_iter()
+        .map(|identity| identity.fingerprint)
+        .collect())
 }
 
 pub fn status(config: &Config, target: &str) -> Result<HostKeyStatus> {
@@ -332,8 +375,8 @@ fn select_fetched_keys(
     }
 }
 
-fn append_known_hosts(lines: &[String]) -> Result<PathBuf> {
-    let path = known_hosts_path()?;
+fn append_known_hosts_at(path: &std::path::Path, lines: &[String]) -> Result<PathBuf> {
+    let path = path.to_path_buf();
     if let Some(parent) = path.parent() {
         crate::store::ensure_private_dir(parent)?;
     }
@@ -351,38 +394,92 @@ fn append_known_hosts(lines: &[String]) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Trust fetched host keys. `fingerprint` is required for non-interactive use;
-/// interactive confirmation is handled by the caller.
-pub fn trust(alias: &str, host: &Host, fingerprint: Option<&str>) -> Result<HostKeyTrustResult> {
-    trust_with_retries(alias, host, fingerprint, 1)
-}
-
-/// Trust fetched host keys with bounded retries for the fetch step.
-pub fn trust_with_retries(
+/// Trust only keys from the same fetch that the user inspected. If a later fetch
+/// differs, confirmation must start again instead of trusting an unseen key.
+pub fn trust_confirmed(
     alias: &str,
     host: &Host,
+    confirmed: &[FetchedHostKey],
     fingerprint: Option<&str>,
     retries: u32,
 ) -> Result<HostKeyTrustResult> {
     let (address, port) = endpoint(host)?;
+    if confirmed.is_empty() {
+        return Err(AppError::invalid_argument(
+            "no fetched host keys were confirmed; fetch and verify them before trusting",
+        ));
+    }
+    let name = known_hosts_name(&address, port);
+    for key in confirmed {
+        let key_name = key.line.split_whitespace().next().unwrap_or_default();
+        if key_name != name {
+            return Err(AppError::new(
+                ErrorCode::HostKeyFailed,
+                "the confirmed host keys belong to a different address or port; fetch and verify them again",
+            ));
+        }
+    }
     let fetched = fetch_with_retries(host, retries)?;
-    let selected = select_fetched_keys(&fetched, fingerprint)?;
-    let known = known_host_keys(host)?;
-    let already_known = selected.iter().any(|key| {
-        known
-            .iter()
-            .any(|existing| existing.fingerprint == key.fingerprint)
-    });
+    ensure_same_confirmed_keys(confirmed, &fetched)?;
+    let selected = select_fetched_keys(confirmed, fingerprint)?;
+    let known = known_host_identities(host)?;
+    persist_confirmed_keys(alias, address, port, &selected, &known)
+}
+
+fn ensure_same_confirmed_keys(
+    confirmed: &[FetchedHostKey],
+    fetched: &[FetchedHostKey],
+) -> Result<()> {
+    if fetched != confirmed {
+        return Err(AppError::new(
+            ErrorCode::HostKeyFailed,
+            "the server host keys changed after confirmation; fetch and verify them again before trusting",
+        ));
+    }
+    Ok(())
+}
+
+fn persist_confirmed_keys(
+    alias: &str,
+    address: String,
+    port: u16,
+    selected: &[FetchedHostKey],
+    known: &[HostKeyIdentity],
+) -> Result<HostKeyTrustResult> {
     let known_hosts = known_hosts_path()?;
-    let added = if already_known {
+    let (added, already_known) = append_missing_at(&known_hosts, selected, known)?;
+    Ok(HostKeyTrustResult {
+        host: alias.to_string(),
+        address,
+        port,
+        added,
+        already_known,
+        known_hosts,
+    })
+}
+
+fn append_missing_at(
+    known_hosts: &std::path::Path,
+    selected: &[FetchedHostKey],
+    known: &[HostKeyIdentity],
+) -> Result<(Vec<HostKeyFingerprint>, Vec<HostKeyFingerprint>)> {
+    let missing = selected
+        .iter()
+        .filter(|key| {
+            !known.iter().any(|existing| {
+                existing.key_type == key.protocol_key_type && existing.blob == key.key_blob
+            })
+        })
+        .collect::<Vec<_>>();
+    let added = if missing.is_empty() {
         Vec::new()
     } else {
-        let lines = selected
+        let lines = missing
             .iter()
             .map(|key| key.line.clone())
             .collect::<Vec<_>>();
-        append_known_hosts(&lines)?;
-        selected
+        append_known_hosts_at(known_hosts, &lines)?;
+        missing
             .iter()
             .map(|key| HostKeyFingerprint {
                 key_type: key.key_type.clone(),
@@ -390,13 +487,32 @@ pub fn trust_with_retries(
             })
             .collect()
     };
-    Ok(HostKeyTrustResult {
-        host: alias.to_string(),
-        address,
-        port,
-        added,
-        known_hosts,
-    })
+    let already_known = selected
+        .iter()
+        .filter(|key| {
+            known.iter().any(|existing| {
+                existing.key_type == key.protocol_key_type && existing.blob == key.key_blob
+            })
+        })
+        .map(|key| HostKeyFingerprint {
+            key_type: key.key_type.clone(),
+            fingerprint: key.fingerprint.clone(),
+        })
+        .collect();
+    Ok((added, already_known))
+}
+
+/// Fetch and trust in one bounded step. This is for non-interactive callers
+/// with a verified fingerprint; interactive TUI confirmation must pass the
+/// displayed keys to `trust_confirmed` instead.
+pub fn trust_with_retries(
+    alias: &str,
+    host: &Host,
+    fingerprint: Option<&str>,
+    retries: u32,
+) -> Result<HostKeyTrustResult> {
+    let keys = fetch_with_retries(host, retries)?;
+    trust_confirmed(alias, host, &keys, fingerprint, retries)
 }
 
 pub fn remove(host: &Host) -> Result<()> {
@@ -488,6 +604,63 @@ mod tests {
         let keys = parse_host_key_lines(output).unwrap_or_else(|error| panic!("parse: {error}"));
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].key_type, "ED25519");
+    }
+
+    #[test]
+    fn changed_refetch_is_rejected_before_known_hosts_is_touched() {
+        let confirmed =
+            test_keys("AAAAC3NzaC1lZDI1NTE5AAAAINMQ87JJskPp8Dx9BOCQgB/o/QEfIbo20d6/qzHHWDrP");
+        let changed =
+            test_keys("AAAAC3NzaC1lZDI1NTE5AAAAIKiL6VQDMroBdzGVw3hYYR91ODaGIT6prxY5CJh99aMY");
+        assert_ne!(confirmed, changed);
+        let error = ensure_same_confirmed_keys(&confirmed, &changed).unwrap_err();
+        assert_eq!(error.code, ErrorCode::HostKeyFailed);
+        assert!(
+            error
+                .detail()
+                .message
+                .contains("changed after confirmation")
+        );
+    }
+
+    #[test]
+    fn partially_known_selection_appends_only_missing_keys() {
+        let confirmed =
+            test_keys("AAAAC3NzaC1lZDI1NTE5AAAAINMQ87JJskPp8Dx9BOCQgB/o/QEfIbo20d6/qzHHWDrP");
+        let additional =
+            test_keys("AAAAC3NzaC1lZDI1NTE5AAAAIKiL6VQDMroBdzGVw3hYYR91ODaGIT6prxY5CJh99aMY");
+        let known = vec![
+            identity_from_public_key_line(&confirmed[0].line)
+                .unwrap_or_else(|error| panic!("identity: {error}")),
+        ];
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("home: {error}"));
+        let selected = [confirmed[0].clone(), additional[0].clone()];
+        let (added, already_known) =
+            append_missing_at(&home.path().join("known_hosts"), &selected, &known)
+                .unwrap_or_else(|error| panic!("trust: {error}"));
+        assert_eq!(
+            added,
+            vec![HostKeyFingerprint {
+                key_type: additional[0].key_type.clone(),
+                fingerprint: additional[0].fingerprint.clone(),
+            }]
+        );
+        assert_eq!(
+            already_known,
+            known
+                .iter()
+                .map(|entry| entry.fingerprint.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("known_hosts")).ok(),
+            Some(format!("{}\n", additional[0].line))
+        );
+    }
+
+    fn test_keys(blob: &str) -> Vec<FetchedHostKey> {
+        let line = format!("[192.0.2.10]:2222 ssh-ed25519 {blob}");
+        parse_host_key_lines(&line).unwrap_or_else(|error| panic!("parse: {error}"))
     }
 
     #[test]

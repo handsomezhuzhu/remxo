@@ -69,6 +69,7 @@ const LAST_FOCUS: usize = ACTION_EXIT;
 
 #[derive(Debug, Clone)]
 struct Draft {
+    host_key_connection_changed: bool,
     alias: TextInput,
     mode: ConnectionMode,
     address: TextInput,
@@ -124,6 +125,7 @@ impl Draft {
             TransportKind::Telnet => ConnectionMode::Telnet,
         };
         Ok(Self {
+            host_key_connection_changed: false,
             alias: input(alias.unwrap_or_else(|| "prod-01".into()), 256)?,
             mode,
             address: input(
@@ -161,6 +163,12 @@ impl Draft {
 
     fn reuse_credentials(&self) -> bool {
         self.editing && self.original_auth == Some(self.auth) && !self.replace_credentials
+    }
+
+    fn observe_host_key_endpoint_edit(&mut self, index: usize, changed: bool) {
+        if changed && matches!(index, 1 | 2 | 4) {
+            self.host_key_connection_changed = true;
+        }
     }
 
     fn private_key_path(&self) -> String {
@@ -404,6 +412,7 @@ impl Draft {
             12 => self.insecure_acknowledged = !self.insecure_acknowledged,
             _ => {}
         }
+        self.observe_host_key_endpoint_edit(index, true);
     }
 
     fn input(&self, index: usize) -> Option<&TextInput> {
@@ -455,6 +464,7 @@ impl Draft {
         if changed && self.editing && matches!(index, 13 | 14) {
             self.replace_credentials = true;
         }
+        self.observe_host_key_endpoint_edit(index, changed);
     }
 
     fn paste(&mut self, index: usize, text: &str) {
@@ -472,6 +482,7 @@ impl Draft {
         if changed && self.editing && matches!(index, 13 | 14) {
             self.replace_credentials = true;
         }
+        self.observe_host_key_endpoint_edit(index, changed);
     }
 
     fn move_left(&mut self, index: usize) {
@@ -499,36 +510,48 @@ impl Draft {
     }
 
     fn backspace(&mut self, index: usize) {
-        if let Some(input) = self.input_mut(index) {
-            input.backspace();
-        }
+        let changed = if let Some(input) = self.input_mut(index) {
+            input.backspace()
+        } else {
+            false
+        };
+        self.observe_host_key_endpoint_edit(index, changed);
     }
 
     fn delete(&mut self, index: usize) {
-        if let Some(input) = self.input_mut(index) {
-            input.delete();
-        }
+        let changed = if let Some(input) = self.input_mut(index) {
+            input.delete()
+        } else {
+            false
+        };
+        self.observe_host_key_endpoint_edit(index, changed);
     }
 
     fn delete_word_before(&mut self, index: usize) {
         if let Some(input) = self.input_mut(index) {
             input.delete_word_before();
         }
+        self.observe_host_key_endpoint_edit(index, true);
     }
 
     fn delete_to_start(&mut self, index: usize) {
         if let Some(input) = self.input_mut(index) {
             input.delete_to_start();
         }
+        self.observe_host_key_endpoint_edit(index, true);
     }
 
     fn clear(&mut self, index: usize) {
+        let changed = self
+            .input(index)
+            .is_some_and(|input| !input.value().is_empty());
         if self.editing && matches!(index, 13 | 14) {
             self.replace_credentials = true;
         }
         if let Some(input) = self.input_mut(index) {
             input.clear();
         }
+        self.observe_host_key_endpoint_edit(index, changed);
     }
 }
 
@@ -630,6 +653,23 @@ impl Wizard {
         self.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
+    fn refresh_host_key_confirmation(&mut self) {
+        if !self.draft.host_key_connection_changed {
+            return;
+        }
+        self.draft.host_key_connection_changed = false;
+        self.host_keys.clear();
+        self.host_key_trusted = false;
+        self.host_key_confirm_pending = false;
+        self.message = self
+            .language
+            .text(
+                "Connection changed. Fetch and verify the host key again before trusting.",
+                "连接地址、端口或类型已改变，请重新获取并核对主机密钥后再信任。",
+            )
+            .into();
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -640,6 +680,7 @@ impl Wizard {
                 KeyCode::Right | KeyCode::End => self.draft.move_end(self.focused),
                 _ => {}
             }
+            self.refresh_host_key_confirmation();
             return;
         }
         match key.code {
@@ -696,6 +737,7 @@ impl Wizard {
             }
             _ => {}
         }
+        self.refresh_host_key_confirmation();
     }
 
     fn action(&mut self) -> Action {
@@ -730,7 +772,10 @@ enum HostKeyJobKind {
 }
 
 enum HostKeyJobOutput {
-    Keys(Vec<crate::hostkey::FetchedHostKey>),
+    Keys {
+        keys: Vec<crate::hostkey::FetchedHostKey>,
+        host: Host,
+    },
     Trusted(crate::hostkey::HostKeyTrustResult),
 }
 
@@ -738,6 +783,7 @@ struct HostKeyJob {
     kind: HostKeyJobKind,
     alias: String,
     host: Host,
+    confirmed: Vec<crate::hostkey::FetchedHostKey>,
     started: Instant,
     attempt: u32,
     retries: u32,
@@ -852,13 +898,15 @@ impl Wizard {
         let kind = job.kind;
         let alias = job.alias.clone();
         let host = job.host.clone();
+        let confirmed = job.confirmed.clone();
         tokio::spawn(async move {
             let result = match kind {
-                HostKeyJobKind::Fetch => {
-                    crate::hostkey::fetch_once(&host).map(HostKeyJobOutput::Keys)
+                HostKeyJobKind::Fetch => crate::hostkey::fetch_once(&host)
+                    .map(|keys| HostKeyJobOutput::Keys { keys, host }),
+                HostKeyJobKind::Trust => {
+                    crate::hostkey::trust_confirmed(&alias, &host, &confirmed, None, 1)
+                        .map(HostKeyJobOutput::Trusted)
                 }
-                HostKeyJobKind::Trust => crate::hostkey::trust_with_retries(&alias, &host, None, 1)
-                    .map(HostKeyJobOutput::Trusted),
             };
             let _ = sender.send(result);
         });
@@ -872,6 +920,11 @@ impl Wizard {
             kind,
             alias,
             host,
+            confirmed: if kind == HostKeyJobKind::Trust {
+                self.host_keys.clone()
+            } else {
+                Vec::new()
+            },
             started: Instant::now(),
             attempt: 1,
             retries,
@@ -918,7 +971,28 @@ impl Wizard {
             Ok(Ok(output)) => {
                 self.host_key_job = None;
                 match output {
-                    HostKeyJobOutput::Keys(keys) => {
+                    HostKeyJobOutput::Keys { keys, host } => {
+                        let current_matches = self.draft.host().is_ok_and(|(_, current)| {
+                            current.transport == host.transport
+                                && current.ssh_alias == host.ssh_alias
+                                && current.hostname == host.hostname
+                                && current.port == host.port
+                        });
+                        if !current_matches {
+                            self.host_keys.clear();
+                            self.host_key_trusted = false;
+                            self.host_key_confirm_pending = false;
+                            self.message = self
+                                .language
+                                .text(
+                                    "Discarded host keys fetched before the connection changed. Fetch and verify again before trusting.",
+                                    "连接已改变，已丢弃先前获取的主机密钥。请重新获取并核对后再信任。",
+                                )
+                                .into();
+                            self.failed = true;
+                            self.tested = false;
+                            return;
+                        }
                         self.host_keys = keys.clone();
                         self.host_key_trusted = false;
                         self.host_key_confirm_pending = false;
@@ -966,9 +1040,18 @@ impl Wizard {
                 }
             }
             Ok(Err(error)) => {
+                let kind = job.kind;
                 let attempt = job.attempt;
                 let retries = job.retries;
-                if attempt < retries {
+                if attempt < retries
+                    && !(kind == HostKeyJobKind::Trust
+                        && matches!(
+                            error.code,
+                            crate::error::ErrorCode::HostKeyFailed
+                                | crate::error::ErrorCode::InvalidArgument
+                                | crate::error::ErrorCode::InvalidConfig
+                        ))
+                {
                     job.attempt = attempt + 1;
                     job.receiver = None;
                     job.retry_at = Some(Instant::now() + Duration::from_millis(250));
@@ -986,10 +1069,16 @@ impl Wizard {
                 } else {
                     self.host_key_job = None;
                     self.message = match self.language {
+                        crate::config::UiLanguage::ZhCn if error.code == crate::error::ErrorCode::HostKeyFailed => {
+                            "信任密钥已改变；请选择获取密钥，重新核对新的指纹。".to_string()
+                        }
                         crate::config::UiLanguage::ZhCn => format!(
                             "主机密钥操作在 {retries} 次尝试后仍失败：{}",
                             crate::i18n::error_message(&error, self.language)
                         ),
+                        crate::config::UiLanguage::En if error.code == crate::error::ErrorCode::HostKeyFailed => {
+                            "Trust rejected a changed host key. Fetch and verify the new fingerprints.".to_string()
+                        }
                         crate::config::UiLanguage::En => format!(
                             "Host key operation failed after {retries} attempts: {}",
                             crate::i18n::error_message(&error, self.language)
@@ -1406,6 +1495,7 @@ pub async fn attach(
             event::read().map_err(|error| AppError::io("read host wizard input", error))?;
         if let Event::Paste(text) = incoming {
             wizard.draft.paste(wizard.focused, &text);
+            wizard.refresh_host_key_confirmation();
             continue;
         }
         let Event::Key(key) = incoming else {
@@ -1471,49 +1561,52 @@ pub async fn attach(
                         wizard.tested = false;
                     }
                 },
-                Action::TrustHostKey => match wizard.draft.host() {
-                    Ok((alias, host)) => {
-                        if wizard.host_keys.is_empty() {
-                            wizard.message = match wizard.language {
-                                crate::config::UiLanguage::ZhCn => {
-                                    "请先选择“获取主机密钥”。".to_string()
-                                }
-                                crate::config::UiLanguage::En => {
-                                    "Choose Fetch host key first.".to_string()
-                                }
-                            };
+                Action::TrustHostKey => {
+                    wizard.refresh_host_key_confirmation();
+                    match wizard.draft.host() {
+                        Ok((alias, host)) => {
+                            if wizard.host_keys.is_empty() {
+                                wizard.message = match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => {
+                                        "请先选择“获取主机密钥”。".to_string()
+                                    }
+                                    crate::config::UiLanguage::En => {
+                                        "Choose Fetch host key first.".to_string()
+                                    }
+                                };
+                                wizard.failed = true;
+                                wizard.tested = false;
+                                continue;
+                            }
+                            if !wizard.host_key_confirm_pending {
+                                wizard.host_key_confirm_pending = true;
+                                let fingerprints = wizard
+                                    .host_keys
+                                    .iter()
+                                    .map(|key| format!("{} {}", key.key_type, key.fingerprint))
+                                    .collect::<Vec<_>>()
+                                    .join("\n  ");
+                                wizard.message = match wizard.language {
+                                    crate::config::UiLanguage::ZhCn => format!(
+                                        "请确认你已人工核对以下主机密钥：\n  {fingerprints}\n再次按 Enter 信任，Esc 取消。"
+                                    ),
+                                    crate::config::UiLanguage::En => format!(
+                                        "Confirm you manually verified these host keys:\n  {fingerprints}\nPress Enter again to trust, Esc to cancel."
+                                    ),
+                                };
+                                wizard.failed = false;
+                                wizard.tested = false;
+                                continue;
+                            }
+                            wizard.start_host_key_job(HostKeyJobKind::Trust, alias, host);
+                        }
+                        Err(error) => {
+                            wizard.message = crate::i18n::error_message(&error, wizard.language);
                             wizard.failed = true;
                             wizard.tested = false;
-                            continue;
                         }
-                        if !wizard.host_key_confirm_pending {
-                            wizard.host_key_confirm_pending = true;
-                            let fingerprints = wizard
-                                .host_keys
-                                .iter()
-                                .map(|key| format!("{} {}", key.key_type, key.fingerprint))
-                                .collect::<Vec<_>>()
-                                .join("\n  ");
-                            wizard.message = match wizard.language {
-                                crate::config::UiLanguage::ZhCn => format!(
-                                    "请确认你已人工核对以下主机密钥：\n  {fingerprints}\n再次按 Enter 信任，Esc 取消。"
-                                ),
-                                crate::config::UiLanguage::En => format!(
-                                    "Confirm you manually verified these host keys:\n  {fingerprints}\nPress Enter again to trust, Esc to cancel."
-                                ),
-                            };
-                            wizard.failed = false;
-                            wizard.tested = false;
-                            continue;
-                        }
-                        wizard.start_host_key_job(HostKeyJobKind::Trust, alias, host);
                     }
-                    Err(error) => {
-                        wizard.message = crate::i18n::error_message(&error, wizard.language);
-                        wizard.failed = true;
-                        wizard.tested = false;
-                    }
-                },
+                }
                 Action::Test => match wizard.draft.host() {
                     Ok((alias, host)) => {
                         let precondition = crate::host::check_can_add(paths, &alias, &host);
@@ -2132,6 +2225,89 @@ fn draw_preview(frame: &mut ratatui::Frame, wizard: &Wizard, area: ratatui::layo
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn editing_endpoint_invalidates_fetched_and_trusted_host_keys() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        Config::initialize(&paths.config).unwrap_or_else(|error| panic!("config: {error}"));
+        let mut wizard = Wizard::new(&paths, None, None, false)
+            .unwrap_or_else(|error| panic!("wizard: {error}"));
+        wizard.draft.mode = ConnectionMode::DirectSsh;
+        wizard.draft.address = TextInput::with_value("192.0.2.20", 256)
+            .unwrap_or_else(|error| panic!("address: {error}"));
+        wizard.draft.port =
+            TextInput::with_value("2222", 5).unwrap_or_else(|error| panic!("port: {error}"));
+        wizard.host_keys = vec![crate::hostkey::FetchedHostKey {
+            key_type: "ED25519".into(),
+            protocol_key_type: "ssh-ed25519".into(),
+            key_blob: "AAAAC3NzaC1lZDI1NTE5AAAAINMQ87JJskPp8Dx9BOCQgB/o/QEfIbo20d6/qzHHWDrP".into(),
+            fingerprint: "SHA256:do-not-trust-after-edit".into(),
+            line: "[192.0.2.20]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMQ87JJskPp8Dx9BOCQgB/o/QEfIbo20d6/qzHHWDrP".into(),
+        }];
+        wizard.host_key_trusted = true;
+        wizard.host_key_confirm_pending = true;
+
+        wizard.focused = 4;
+        wizard.draft.port =
+            TextInput::with_value("2222", 5).unwrap_or_else(|error| panic!("port: {error}"));
+        wizard.handle_key(KeyCode::Backspace);
+        assert!(
+            wizard.host_keys.is_empty(),
+            "port={} changed={} pending={}",
+            wizard.draft.port.value(),
+            wizard.draft.host_key_connection_changed,
+            wizard.host_key_confirm_pending
+        );
+        assert!(!wizard.host_key_trusted);
+        assert!(!wizard.host_key_confirm_pending);
+        assert!(wizard.message.contains("Fetch and verify"));
+    }
+
+    #[test]
+    fn stale_fetched_host_keys_are_discarded_after_connection_edits() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::new(Some(directory.path().join("config.toml")))
+            .unwrap_or_else(|error| panic!("paths: {error}"));
+        Config::initialize(&paths.config).unwrap_or_else(|error| panic!("config: {error}"));
+        let mut wizard = Wizard::new(&paths, None, None, false)
+            .unwrap_or_else(|error| panic!("wizard: {error}"));
+        let mut host = Host {
+            hostname: Some("192.0.2.20".into()),
+            ..Host::default()
+        };
+        wizard.draft.mode = ConnectionMode::DirectSsh;
+        wizard.draft.address = TextInput::with_value("192.0.2.20", 256)
+            .unwrap_or_else(|error| panic!("address: {error}"));
+        let (sender, receiver) = oneshot::channel();
+        wizard.host_key_job = Some(HostKeyJob {
+            kind: HostKeyJobKind::Fetch,
+            alias: "isolated".into(),
+            host: host.clone(),
+            confirmed: Vec::new(),
+            started: Instant::now(),
+            attempt: 1,
+            retries: 1,
+            retry_at: None,
+            receiver: Some(receiver),
+        });
+        host.hostname = Some(("192.0.2.21").into());
+        wizard.draft.address = TextInput::with_value("192.0.2.21", 256)
+            .unwrap_or_else(|error| panic!("address: {error}"));
+        let _ = sender.send(Ok(HostKeyJobOutput::Keys {
+            keys: Vec::new(),
+            host: Host {
+                hostname: Some("192.0.2.20".into()),
+                ..host
+            },
+        }));
+        wizard.update_host_key_job();
+        assert!(wizard.host_key_job.is_none());
+        assert!(wizard.host_keys.is_empty());
+        assert!(wizard.failed);
+        assert!(wizard.message.contains("Discarded host keys"));
+    }
 
     #[test]
     fn choices_preserve_posix_and_security_defaults() {
