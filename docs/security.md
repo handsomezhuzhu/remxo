@@ -63,7 +63,7 @@ Vault 使用：
 Remxo 复用系统 OpenSSH，不自行实现 SSH 协议。
 
 - 主机密钥检查保持开启；不会自动添加 `StrictHostKeyChecking=no`、`UserKnownHostsFile=/dev/null`。
-- `remxo host key fetch` 只展示网络侧指纹；`trust` 必须交互输入 `TRUST` 或提供匹配的 `--fingerprint`，属于人工 TOFU，不是自动接受。
+- `remxo host key fetch` 只展示网络侧指纹；`trust` 必须交互输入 `TRUST` 或提供匹配的 `--fingerprint`，属于人工 TOFU，不是自动接受。写入前再次确认已展示的密钥集合未变；changed response 触发 host_key_failed 而不落盘。已有密钥按 type/blob 个别识别，只补缺失项；向导端点变化和过期 fetch 都会使旧确认失效。
 - 不会自动添加 `ForwardAgent=yes`。
 - host-key 确认类 ASKPASS 提示一律拒绝；未知主机由人类预先验证和登记。
 - Vault 模式使用固定认证组合，不回退到另一种凭据，也不做隐式重试。

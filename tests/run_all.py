@@ -147,12 +147,19 @@ def main():
         else:
             scripts = {
                 "fake": ["fault_and_stress.py"],
-                "pty": ["pty_acceptance.py"],
+                "pty": [
+                    "pty_acceptance.py",
+                    "host_key_confirmation.py changing",
+                    "host_key_confirmation.py stable",
+                    "host_key_confirmation.py partial",
+                    "host_key_confirmation.py wizard-changing",
+                ],
                 "real": ["sshd_acceptance.py", "vault_auth_acceptance.py"],
                 "sudo": ["sudo_acceptance.py"],
             }[suite]
             for script in scripts:
-                results.append(execute(suite, [sys.executable, ROOT / "tests" / "integration" / script], env))
+                script_name, *script_args = script.split()
+                results.append(execute(suite, [sys.executable, ROOT / "tests" / "integration" / script_name, *script_args], env))
                 if results[-1]["status"] != "passed":
                     break
             if results[-1]["status"] != "passed":

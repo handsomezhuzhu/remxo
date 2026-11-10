@@ -2,9 +2,21 @@
 
 目标：仓库之外不需要真实服务器、账号、密码、私钥、SSH Agent 或平台 Token。测试失败和环境不可用分别报告，禁止把跳过写成通过；源码中存在测试也不等于该测试在当前改动上运行过。
 
-## 当前认证改动的验证状态
+## 当前验证状态
 
-截至 2026-11-08 本次未提交工作副本的实际验证结果：
+### 2026-11-10：主机密钥确认绑定（R02）
+
+当前 `dev` 工作副本在 Instabox `remxo-dev` 上运行了 `python3 tests/run_all.py --require-real-ssh --report target/final-r01-r02-tests.json`：fmt、Clippy、Rust 全目标测试、构建、npm、fake、5 个 PTY suite（原基础 case + CLI changed/stable/partial + Wizard changed）、两个真实 sshd suite、sudo 和 cleanup 全部 PASSED，真实 SSH 未跳过。这不是已推送 main 或 Windows CI 的通过。
+
+R02 原始提交的二进制在临时 HOME + fake keyscan 下实际复现了确认 A 后写入未确认 B；新实现拒绝且不产生 known_hosts。新 PTY 用例进一步覆盖稳定相同抓取A/B集全量登记、哈希 known_hosts 的 A 已登记而 B 缺失时只补 B，以及真实向导确认后变化拒绝。两次 keyscan 和隔离文件内容被独立断言；没有读取真实 `~/.ssh`、真实凭据或用户服务器。新单测覆盖 endpoint 编辑失效与旧 fetch 响应丢弃。下面 R01 段落的历史结果不替代本轮验证：
+
+### 2026-11-10：审批读取判断修复（R01）
+
+本轮修改 `src/policy.rs` 的本工作副本已实际验证：在隔离、无真实 Vault/凭据注入的 Instabox `remxo-dev` 中，`python3 tests/run_all.py --require-real-ssh --report target/policy-r01-tests.json` 的 fmt、Clippy、Rust 全目标测试、构建、npm、fake、PTY、两个 real suite、sudo 和 cleanup 全部 PASSED，真实 SSH 未跳过。5 个 `policy` 单元测试在修改上通过；相同新增测试与原始策略实现对照时，写入误判与审批结果用例失败，因此覆盖并非仅验证测试本身。机器可读报告另附退出码、时长和输出摘要。
+
+新增测试覆盖 `git branch -D`、`git diff --output=...`、`journalctl --vacuum-size` 的分离与等号参数形式、`date --set`/`date -s` 和 `hostname NEWNAME` 的审批需求，以及普通读取选项、sudo、never/always 的既有结果；只判断策略，不执行示例写命令。本轮未执行 Windows 验证，未修 Broker/恢复/路径/进程超时等其他审查项。
+
+下面是 2026-11-08 的历史基线，不能当作后续工作副本已经重新完成了 Windows 验证：
 
 - Windows 原生 `cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets -- --test-threads=1` 和 `cargo build` 均通过；这只是当前 Rust 自动检查与构建，不代表全部 Windows 认证、ConPTY/窗口场景都完成验证。
 - 隔离、无 Vault 注入的 Instabox `remxo-dev` 上，`python3 tests/run_all.py` 的 `checks/fmt`、`checks/clippy`、`checks/unit`、`checks/build`、fake、PTY、两个 real suite、sudo 和 cleanup 均为 PASSED，真实 suite 未跳过。
